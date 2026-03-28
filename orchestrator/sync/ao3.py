@@ -1,0 +1,380 @@
+"""
+sync/ao3.py — Milestone 6: FanFicFare integration.
+
+Downloads AO3 stories as epubs using the FanFicFare CLI, in batches
+with configurable delays to avoid rate-limiting and the FanFicFare
+stall issue that occurs after a handful of sequential downloads.
+
+FanFicFare must be installed on the Windows side:
+    pip install fanficfare
+
+Or available via the configured FANFICFARE_CMD path in config.py.
+
+AO3 work URL format:
+    https://archiveofourown.org/works/<work_id>
+"""
+
+from __future__ import annotations
+
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from orchestrator import config
+
+AO3_WORK_URL = "https://archiveofourown.org/works/{work_id}"
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DownloadResult:
+    """Result of attempting to download one AO3 story."""
+
+    story: dict                        # original story dict from diff.py
+    epub_path: Path | None = field(default=None)  # None if download failed
+    error: str | None = field(default=None)
+
+    @property
+    def success(self) -> bool:
+        return self.epub_path is not None
+
+    @property
+    def credentials_error(self) -> bool:
+        """True if the failure was caused by missing or invalid AO3 credentials."""
+        return bool(self.error and _is_credentials_error(self.error))
+
+
+# ---------------------------------------------------------------------------
+# URL helpers
+# ---------------------------------------------------------------------------
+
+
+def build_ao3_url(work_id: str) -> str:
+    """Return the canonical AO3 work URL for the given work ID."""
+    return AO3_WORK_URL.format(work_id=work_id)
+
+
+# ---------------------------------------------------------------------------
+# Credentials error detection
+# ---------------------------------------------------------------------------
+
+
+def _is_credentials_error(output: str) -> bool:
+    """
+    Return True if FanFicFare's output indicates an AO3 login failure.
+
+    This happens when a story requires login (registered users only, or
+    adult content gating) and either no credentials are configured or the
+    credentials are wrong. FanFicFare surfaces this as a 403 on the AO3
+    login endpoint, and the traceback always passes through performLogin.
+    """
+    lower = output.lower()
+    return "performlogin" in lower or "archiveofourown.org/users/login" in lower
+
+
+# ---------------------------------------------------------------------------
+# Cloudflare error detection
+# ---------------------------------------------------------------------------
+
+# HTTP status codes returned by Cloudflare that are transient and retryable.
+# 525 — SSL Handshake Failed (most common AO3/Cloudflare error)
+# 524 — A Timeout Occurred
+# 503 — Service Unavailable (CF under load)
+# 502 — Bad Gateway
+# 429 — Too Many Requests (rate limiting)
+_CLOUDFLARE_RETRYABLE_CODES = {"525", "524", "503", "502", "429"}
+
+
+def _is_cloudflare_error(output: str) -> bool:
+    """
+    Return True if FanFicFare's output looks like a transient Cloudflare error.
+
+    Checks both for the word "cloudflare" and for known retryable HTTP status
+    codes. FanFicFare typically surfaces these as "Error getting Page: 525" or
+    similar in stderr/stdout.
+    """
+    lower = output.lower()
+    if "cloudflare" in lower:
+        return True
+    return any(code in output for code in _CLOUDFLARE_RETRYABLE_CODES)
+
+
+# ---------------------------------------------------------------------------
+# Single-story download
+# ---------------------------------------------------------------------------
+
+
+def download_story(
+    story: dict,
+    output_dir: Path,
+    *,
+    timeout: int | None = None,
+    fanficfare_cmd: str | None = None,
+    extra_options: list[str] | None = None,
+    retry_count: int | None = None,
+    retry_delay: int | None = None,
+) -> DownloadResult:
+    """
+    Download one AO3 story as an epub via the FanFicFare CLI.
+
+    Detects the output file by comparing directory contents before and after
+    the download — this is reliable regardless of FanFicFare's filename logic.
+
+    AO3 sits behind Cloudflare, which can return transient errors (most
+    commonly 525 SSL Handshake Failed). When a Cloudflare error is detected,
+    the download is retried up to retry_count times with a retry_delay second
+    wait between attempts. Non-Cloudflare failures (deleted story, login
+    required, FanFicFare stall timeout) are not retried.
+
+    Args:
+        story:          Story dict (must contain 'ao3_work_id').
+        output_dir:     Directory to write the epub into.
+        timeout:        Per-download timeout in seconds. Defaults to
+                        config.FANFICFARE_TIMEOUT.
+        fanficfare_cmd: FanFicFare executable name or path. Defaults to
+                        config.FANFICFARE_CMD.
+        retry_count:    Max retries on Cloudflare errors. Defaults to
+                        config.FANFICFARE_RETRY_COUNT.
+        retry_delay:    Seconds to wait before each retry. Defaults to
+                        config.FANFICFARE_RETRY_DELAY.
+
+    Returns:
+        DownloadResult with epub_path set on success, error set on failure.
+        If all retries are exhausted, the error message includes the attempt
+        count so the caller can distinguish a persistent CF error from a
+        one-shot failure.
+    """
+    if timeout is None:
+        timeout = config.FANFICFARE_TIMEOUT
+    if fanficfare_cmd is None:
+        fanficfare_cmd = config.FANFICFARE_CMD
+    if extra_options is None:
+        extra_options = config.FANFICFARE_EXTRA_OPTIONS
+    if retry_count is None:
+        retry_count = config.FANFICFARE_RETRY_COUNT
+    if retry_delay is None:
+        retry_delay = config.FANFICFARE_RETRY_DELAY
+
+    work_id = story["ao3_work_id"]
+    url = build_ao3_url(work_id)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Snapshot taken once before any attempt so the epub detector works
+    # correctly even if a partial file appears and disappears across retries.
+    before: set[Path] = set(output_dir.glob("*.epub"))
+
+    max_attempts = 1 + retry_count
+    option_flags = [flag for opt in extra_options for flag in ("-o", opt)]
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            proc = subprocess.run(
+                [fanficfare_cmd, *option_flags, url],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=timeout,
+                cwd=str(output_dir),
+            )
+        except FileNotFoundError:
+            return DownloadResult(
+                story=story,
+                error=(
+                    f"FanFicFare executable not found: {fanficfare_cmd!r}. "
+                    "Install it with: pip install fanficfare"
+                ),
+            )
+        except subprocess.TimeoutExpired:
+            # Stall timeout — not a CF error, do not retry.
+            return DownloadResult(
+                story=story,
+                error=f"FanFicFare timed out after {timeout} s (work_id={work_id})",
+            )
+
+        if proc.returncode == 0:
+            # Success — detect the new epub.
+            after: set[Path] = set(output_dir.glob("*.epub"))
+            new_files = after - before
+            if not new_files:
+                return DownloadResult(
+                    story=story,
+                    error=(
+                        "FanFicFare reported success but no new epub was found "
+                        f"in {output_dir} (work_id={work_id})"
+                    ),
+                )
+            # More than one new file is unexpected but possible for very long
+            # stories that FanFicFare splits. Pick the most recently modified.
+            epub_path = max(new_files, key=lambda p: p.stat().st_mtime)
+            return DownloadResult(story=story, epub_path=epub_path)
+
+        # Non-zero exit.
+        combined_output = proc.stderr + proc.stdout
+        detail = (proc.stderr.strip() or proc.stdout.strip() or "no output")
+
+        if (_is_cloudflare_error(combined_output) or _is_credentials_error(combined_output)) and attempt < max_attempts:
+            # Transient error: Cloudflare block or Cloudflare blocking the AO3
+            # login endpoint. Both are retryable — wait and try again.
+            time.sleep(retry_delay)
+            continue
+
+        # Non-retryable failure, or Cloudflare retries exhausted.
+        if attempt > 1:
+            error = (
+                f"FanFicFare exited with code {proc.returncode} after "
+                f"{attempt} attempt(s) (work_id={work_id}): {detail}"
+            )
+        else:
+            error = f"FanFicFare exited with code {proc.returncode}: {detail}"
+
+        return DownloadResult(story=story, error=error)
+
+    # Unreachable — loop always returns — but satisfies the type checker.
+    return DownloadResult(story=story, error="Unexpected retry loop exit")
+
+
+# ---------------------------------------------------------------------------
+# Batched download
+# ---------------------------------------------------------------------------
+
+
+def download_stories(
+    stories: list[dict],
+    output_dir: Path | None = None,
+    batch_size: int | None = None,
+    batch_delay: int | None = None,
+    story_delay: int | None = None,
+    timeout: int | None = None,
+    fanficfare_cmd: str | None = None,
+    extra_options: list[str] | None = None,
+    retry_count: int | None = None,
+    retry_delay: int | None = None,
+    progress_callback: Callable[[DownloadResult], None] | None = None,
+) -> list[DownloadResult]:
+    """
+    Download a list of AO3 stories as epubs, in batches with delays.
+
+    Two levels of pacing are applied to avoid triggering AO3/Cloudflare
+    rate-limiting:
+
+      story_delay  — pause after every individual story (except the last).
+                     This is the primary throttle. A burst of back-to-back
+                     downloads within a batch is what triggers AO3 detection,
+                     so spacing every story is more effective than only pausing
+                     between batches.
+
+      batch_delay  — additional pause between batches, on top of story_delay.
+                     Provides a longer cooldown after each batch completes.
+
+    FanFicFare can also stall after a handful of sequential downloads;
+    the batch structure with its delays helps prevent this too.
+
+    Cloudflare transient errors (e.g. 525 SSL Handshake Failed) are retried
+    automatically per story. See download_story() for retry semantics.
+
+    Args:
+        stories:           Story dicts from diff.py (each must have 'ao3_work_id').
+        output_dir:        Directory to save epubs. Defaults to
+                           config.EPUB_DOWNLOAD_DIR.
+        batch_size:        Number of stories per batch. Defaults to
+                           config.FANFICFARE_BATCH_SIZE.
+        batch_delay:       Extra seconds to pause between batches (added after
+                           the story_delay for the last story in the batch).
+                           Defaults to config.FANFICFARE_BATCH_DELAY.
+        story_delay:       Seconds to pause after each story. Defaults to
+                           config.FANFICFARE_STORY_DELAY.
+        timeout:           Per-download timeout in seconds. Defaults to
+                           config.FANFICFARE_TIMEOUT.
+        fanficfare_cmd:    FanFicFare executable. Defaults to
+                           config.FANFICFARE_CMD.
+        retry_count:       Max retries per story on Cloudflare errors. Defaults
+                           to config.FANFICFARE_RETRY_COUNT.
+        retry_delay:       Seconds to wait before each retry. Defaults to
+                           config.FANFICFARE_RETRY_DELAY.
+        progress_callback: Called with each DownloadResult immediately after
+                           it completes (before any post-story sleep).
+
+    Returns:
+        List of DownloadResult in the same order as the input stories.
+    """
+    if output_dir is None:
+        output_dir = config.EPUB_DOWNLOAD_DIR
+    if batch_size is None:
+        batch_size = config.FANFICFARE_BATCH_SIZE
+    if batch_delay is None:
+        batch_delay = config.FANFICFARE_BATCH_DELAY
+    if story_delay is None:
+        story_delay = config.FANFICFARE_STORY_DELAY
+    if timeout is None:
+        timeout = config.FANFICFARE_TIMEOUT
+    if fanficfare_cmd is None:
+        fanficfare_cmd = config.FANFICFARE_CMD
+    if extra_options is None:
+        extra_options = config.FANFICFARE_EXTRA_OPTIONS
+    if retry_count is None:
+        retry_count = config.FANFICFARE_RETRY_COUNT
+    if retry_delay is None:
+        retry_delay = config.FANFICFARE_RETRY_DELAY
+
+    results: list[DownloadResult] = []
+    total = len(stories)
+
+    for batch_start in range(0, total, batch_size):
+        batch = stories[batch_start : batch_start + batch_size]
+
+        for batch_pos, story in enumerate(batch):
+            story_index = batch_start + batch_pos  # 0-based index across whole run
+            is_last_story = (story_index == total - 1)
+            is_last_in_batch = (batch_pos == len(batch) - 1)
+
+            result = download_story(
+                story,
+                output_dir,
+                timeout=timeout,
+                fanficfare_cmd=fanficfare_cmd,
+                extra_options=extra_options,
+                retry_count=retry_count,
+                retry_delay=retry_delay,
+            )
+            results.append(result)
+            if progress_callback is not None:
+                progress_callback(result)
+
+            if is_last_story:
+                # No delay after the very last story.
+                break
+
+            if is_last_in_batch:
+                # End of a batch (but not the end of the run): story_delay +
+                # batch_delay gives a longer cooldown between batches.
+                if story_delay > 0:
+                    time.sleep(story_delay)
+                if batch_delay > 0:
+                    time.sleep(batch_delay)
+            else:
+                # Mid-batch: standard per-story delay.
+                if story_delay > 0:
+                    time.sleep(story_delay)
+
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Result filters
+# ---------------------------------------------------------------------------
+
+
+def successful_downloads(results: list[DownloadResult]) -> list[DownloadResult]:
+    """Return only the results where the download succeeded."""
+    return [r for r in results if r.success]
+
+
+def failed_downloads(results: list[DownloadResult]) -> list[DownloadResult]:
+    """Return only the results where the download failed."""
+    return [r for r in results if not r.success]

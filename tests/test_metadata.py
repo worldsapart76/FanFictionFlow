@@ -100,6 +100,20 @@ class TestBuildMetadata:
             "#ao3_work_id", "#collection", "#primaryship", "#wordcount", "#readstatus"
         }
 
+    def test_write_readstatus_false_omits_readstatus(self):
+        result = build_metadata(_story(), write_readstatus=False)
+        assert "#readstatus" not in result
+        assert set(result.keys()) == {
+            "#ao3_work_id", "#collection", "#primaryship", "#wordcount"
+        }
+
+    def test_write_readstatus_false_preserves_other_fields(self):
+        result = build_metadata(_story(), write_readstatus=False)
+        assert result["#ao3_work_id"] == "12345"
+        assert result["#collection"] == "Hunger Games"
+        assert result["#primaryship"] == "Katniss/Peeta"
+        assert result["#wordcount"] == 50000
+
 
 # ---------------------------------------------------------------------------
 # write_metadata — success path
@@ -133,6 +147,13 @@ class TestWriteMetadataSuccess:
         assert set(fields_arg.keys()) == {
             "#ao3_work_id", "#collection", "#primaryship", "#wordcount", "#readstatus"
         }
+
+    def test_write_readstatus_false_omits_readstatus_from_calibre_call(self):
+        with patch("orchestrator.sync.metadata.calibre.set_metadata_fields") as mock_write:
+            write_metadata(1, _story(), write_readstatus=False)
+
+        fields_arg = mock_write.call_args[0][1]
+        assert "#readstatus" not in fields_arg
 
     def test_read_status_override_passed_through(self):
         with patch("orchestrator.sync.metadata.calibre.set_metadata_fields") as mock_write:
@@ -261,6 +282,30 @@ class TestWriteAllMetadata:
         with patch("orchestrator.sync.metadata.calibre.set_metadata_fields") as mock_write:
             write_all_metadata(imports)
         assert mock_write.call_count == 5
+
+    def test_fresh_ids_none_writes_readstatus_to_all(self):
+        """Default (fresh_ids=None) writes readstatus to every book."""
+        imports = [(1, _story()), (2, _story())]
+        with patch("orchestrator.sync.metadata.calibre.set_metadata_fields"):
+            results = write_all_metadata(imports, fresh_ids=None)
+        for r in results:
+            assert "#readstatus" in r.fields_written
+
+    def test_fresh_ids_only_writes_readstatus_to_fresh_books(self):
+        """Books not in fresh_ids must not have readstatus written."""
+        imports = [(1, _story(ao3_work_id="a")), (2, _story(ao3_work_id="b"))]
+        with patch("orchestrator.sync.metadata.calibre.set_metadata_fields"):
+            results = write_all_metadata(imports, fresh_ids={1})
+        assert "#readstatus" in results[0].fields_written  # book 1 is fresh
+        assert "#readstatus" not in results[1].fields_written  # book 2 already existed
+
+    def test_fresh_ids_empty_set_skips_readstatus_for_all(self):
+        """An empty fresh_ids set means no book gets readstatus written."""
+        imports = [(1, _story()), (2, _story())]
+        with patch("orchestrator.sync.metadata.calibre.set_metadata_fields"):
+            results = write_all_metadata(imports, fresh_ids=set())
+        for r in results:
+            assert "#readstatus" not in r.fields_written
 
 
 # ---------------------------------------------------------------------------

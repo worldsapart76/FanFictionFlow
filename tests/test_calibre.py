@@ -130,11 +130,12 @@ class TestFetchExistingShipValues:
 # ---------------------------------------------------------------------------
 
 class TestAddBook:
-    def test_returns_calibre_id(self):
+    def test_returns_calibre_id_and_fresh_true(self):
         mock_result = _make_completed_process(stdout="Added book ids: 42\n")
         with patch("orchestrator.sync.calibre._run", return_value=mock_result):
-            result = calibre.add_book(Path("story.epub"))
-        assert result == 42
+            calibre_id, is_fresh = calibre.add_book(Path("story.epub"))
+        assert calibre_id == 42
+        assert is_fresh is True
 
     def test_passes_epub_path(self):
         mock_result = _make_completed_process(stdout="Added book ids: 1\n")
@@ -143,11 +144,22 @@ class TestAddBook:
         args_passed = mock_run.call_args[0][0]
         assert r"C:\Downloads\story.epub" in args_passed
 
-    def test_raises_if_id_not_in_output(self):
-        mock_result = _make_completed_process(stdout="Some unexpected output\n")
-        with patch("orchestrator.sync.calibre._run", return_value=mock_result):
+    def test_returns_existing_id_and_fresh_false_when_duplicate(self):
+        """When calibredb returns no ID, fallback finds existing book and is_fresh=False."""
+        no_id_result = _make_completed_process(stdout="DeDRM output only\n")
+        found_result = _make_completed_process(stdout='[{"id": 99}]')
+        with patch("orchestrator.sync.calibre._run", side_effect=[no_id_result, found_result]):
+            calibre_id, is_fresh = calibre.add_book(Path("Story-ao3_12345.epub"))
+        assert calibre_id == 99
+        assert is_fresh is False
+
+    def test_raises_if_id_not_in_output_and_no_fallback(self):
+        no_id_result = _make_completed_process(stdout="Some unexpected output\n")
+        # Fallback search also returns nothing
+        empty_result = _make_completed_process(stdout="[]")
+        with patch("orchestrator.sync.calibre._run", side_effect=[no_id_result, empty_result]):
             with pytest.raises(RuntimeError, match="Could not parse Calibre ID"):
-                calibre.add_book(Path("story.epub"))
+                calibre.add_book(Path("story_no_ao3id.epub"))
 
 
 # ---------------------------------------------------------------------------

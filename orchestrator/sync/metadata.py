@@ -48,30 +48,39 @@ class MetadataResult:
 # ---------------------------------------------------------------------------
 
 
-def build_metadata(story: dict, read_status: str | None = None) -> dict[str, str | int]:
+def build_metadata(
+    story: dict,
+    read_status: str | None = None,
+    write_readstatus: bool = True,
+) -> dict[str, str | int]:
     """
     Build the Calibre custom field dict for one confirmed story.
 
     Args:
-        story:       Confirmed story dict from get_confirmed_stories().
-                     Must contain ao3_work_id, word_count, resolved_ship,
-                     resolved_collection.
-        read_status: Override the default read status for this story.
-                     Defaults to config.DEFAULT_READ_STATUS.
+        story:            Confirmed story dict from get_confirmed_stories().
+                          Must contain ao3_work_id, word_count, resolved_ship,
+                          resolved_collection.
+        read_status:      Override the default read status for this story.
+                          Defaults to config.DEFAULT_READ_STATUS.
+        write_readstatus: When False, ``#readstatus`` is omitted from the
+                          returned dict.  Pass False for books that already
+                          existed in Calibre so their existing status is
+                          preserved.
 
     Returns:
         Dict of {field_name: value} ready for calibre.set_metadata_fields().
     """
-    if read_status is None:
-        read_status = config.DEFAULT_READ_STATUS
-
-    return {
+    fields: dict[str, str | int] = {
         "#ao3_work_id": str(story["ao3_work_id"]),
         "#collection": str(story["resolved_collection"]),
         "#primaryship": str(story["resolved_ship"]),
         "#wordcount": int(story.get("word_count", 0)),
-        "#readstatus": str(read_status),
     }
+    if write_readstatus:
+        if read_status is None:
+            read_status = config.DEFAULT_READ_STATUS
+        fields["#readstatus"] = str(read_status)
+    return fields
 
 
 # ---------------------------------------------------------------------------
@@ -83,14 +92,18 @@ def write_metadata(
     calibre_id: int,
     story: dict,
     read_status: str | None = None,
+    write_readstatus: bool = True,
 ) -> MetadataResult:
     """
     Write all custom metadata fields for one newly imported book.
 
     Args:
-        calibre_id:  Calibre book ID assigned by calibredb add.
-        story:       Confirmed story dict from get_confirmed_stories().
-        read_status: Override read status. Defaults to config.DEFAULT_READ_STATUS.
+        calibre_id:       Calibre book ID assigned by calibredb add.
+        story:            Confirmed story dict from get_confirmed_stories().
+        read_status:      Override read status. Defaults to config.DEFAULT_READ_STATUS.
+        write_readstatus: When False, ``#readstatus`` is not written — use for
+                          books that already existed in Calibre so their status
+                          is preserved.
 
     Returns:
         MetadataResult with fields_written populated on success, error set on
@@ -98,7 +111,7 @@ def write_metadata(
         so the caller can continue writing other stories and report failures in
         aggregate.
     """
-    fields = build_metadata(story, read_status=read_status)
+    fields = build_metadata(story, read_status=read_status, write_readstatus=write_readstatus)
     try:
         calibre.set_metadata_fields(calibre_id, fields)
     except Exception as exc:
@@ -114,6 +127,7 @@ def write_metadata(
 def write_all_metadata(
     imports: list[tuple[int, dict]],
     read_status: str | None = None,
+    fresh_ids: set[int] | None = None,
 ) -> list[MetadataResult]:
     """
     Write metadata for a list of newly imported books.
@@ -123,12 +137,21 @@ def write_all_metadata(
                      order returned by calibredb add.
         read_status: Default read status for all new imports.
                      Defaults to config.DEFAULT_READ_STATUS.
+        fresh_ids:   Set of calibre IDs that were genuinely newly added (not
+                     already present in the library).  Only books in this set
+                     receive a ``#readstatus`` write.  When None (the default),
+                     all books receive it — preserving backwards compatibility.
 
     Returns:
         List of MetadataResult in the same order as imports.
     """
     return [
-        write_metadata(calibre_id, story, read_status=read_status)
+        write_metadata(
+            calibre_id,
+            story,
+            read_status=read_status,
+            write_readstatus=(fresh_ids is None or calibre_id in fresh_ids),
+        )
         for calibre_id, story in imports
     ]
 

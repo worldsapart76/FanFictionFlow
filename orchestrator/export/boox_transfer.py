@@ -17,8 +17,11 @@ Raises BooxNotConnectedError if ADB cannot reach the device.
 from __future__ import annotations
 
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 from orchestrator import config
 
@@ -54,6 +57,7 @@ class TransferResult:
 def transfer_to_boox(
     epub_paths: list[Path],
     csv_path: Path | None = None,
+    rename_map: dict[Path, str] | None = None,
 ) -> TransferResult:
     """
     Push epub files and an optional library CSV to the Boox Palma via ADB.
@@ -64,8 +68,13 @@ def transfer_to_boox(
     file does not abort the rest.
 
     Args:
-        epub_paths: Local epub files to push.
-        csv_path:   Optional library CSV file to push alongside the epubs.
+        epub_paths:  Local epub files to push.
+        csv_path:    Optional library CSV file to push alongside the epubs.
+        rename_map:  Optional mapping of local epub Path → desired remote
+                     filename (basename only). When provided, epub files found
+                     in the map are pushed under the mapped name instead of
+                     their local filename. The CSV is never renamed. Files not
+                     in the map fall back to their local filename.
 
     Returns:
         TransferResult with device_path, pushed remote paths, and any
@@ -85,7 +94,8 @@ def transfer_to_boox(
         sources.append(csv_path)
 
     for src in sources:
-        remote = f"{device_path}/{src.name}"
+        dest_name = (rename_map or {}).get(src, src.name)
+        remote = f"{device_path}/{dest_name}"
         try:
             _push_file(adb, src, remote)
             result.copied.append(remote)
@@ -119,6 +129,13 @@ def _check_connected(adb: list[str]) -> None:
             adb + ["get-state"],
             capture_output=True,
             text=True,
+            timeout=10,
+            creationflags=_NO_WINDOW,
+        )
+    except subprocess.TimeoutExpired:
+        raise BooxNotConnectedError(
+            "ADB timed out checking device state. "
+            "Ensure the device is connected and USB debugging is authorized."
         )
     except FileNotFoundError:
         raise BooxNotConnectedError(
@@ -145,6 +162,8 @@ def _push_file(adb: list[str], src: Path, remote: str) -> None:
         adb + ["push", str(src), remote],
         capture_output=True,
         text=True,
+        timeout=60,
+        creationflags=_NO_WINDOW,
     )
     if proc.returncode != 0:
         detail = (proc.stderr or proc.stdout).strip()

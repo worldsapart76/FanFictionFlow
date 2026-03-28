@@ -44,7 +44,7 @@ print(f"  BOOX_DEVICE_PATH : {config.BOOX_DEVICE_PATH}")
 print()
 
 try:
-    proc = subprocess.run(adb + ["get-state"], capture_output=True, text=True)
+    proc = subprocess.run(adb + ["get-state"], capture_output=True, text=True, timeout=10)
     state = proc.stdout.strip()
     print(f"  adb get-state → {state!r}")
     if state != "device":
@@ -124,6 +124,7 @@ with tempfile.TemporaryDirectory() as tmp:
             proc = subprocess.run(
                 adb + ["shell", "cat", remote],
                 capture_output=True,
+                timeout=10,
             )
             if proc.stdout == b"OVERWRITTEN content":
                 print("  PASS — overwrite confirmed on device.")
@@ -148,6 +149,7 @@ if keep != "y":
             adb + ["shell", "rm", "-f", remote],
             capture_output=True,
             text=True,
+            timeout=10,
         )
         if proc.returncode == 0:
             removed.append(name)

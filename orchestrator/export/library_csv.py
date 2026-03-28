@@ -13,6 +13,7 @@ the CalibreFanFicBrowser repo — it parses this file by column name.
 from __future__ import annotations
 
 import csv
+import datetime
 from pathlib import Path
 
 from orchestrator import config
@@ -53,7 +54,7 @@ def export_library_csv(output_path: Path | None = None) -> Path:
 
     Args:
         output_path: Destination file path. Defaults to
-                     config.LIBRARY_CSV_FILENAME in the current directory.
+                     config.LIBRARY_CSV_PATH (~/.fanficflow/library_csv.csv).
 
     Returns:
         Resolved absolute path to the written CSV file.
@@ -63,11 +64,26 @@ def export_library_csv(output_path: Path | None = None) -> Path:
         OSError: if the output file cannot be written.
     """
     if output_path is None:
-        output_path = Path(config.LIBRARY_CSV_FILENAME)
+        csv_dir = config.LIBRARY_CSV_PATH.parent
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = csv_dir / f"library_csv_{ts}.csv"
 
     books = calibre.fetch_library()
     _write_csv(books, output_path)
     return output_path.resolve()
+
+
+def find_latest_csv() -> Path | None:
+    """
+    Return the most recently exported library CSV, or None if none exists.
+
+    Scans config.LIBRARY_CSV_PATH.parent for library_csv_*.csv files and
+    returns the last one when sorted by name (timestamps sort lexicographically).
+    """
+    csv_dir = config.LIBRARY_CSV_PATH.parent
+    candidates = sorted(csv_dir.glob("library_csv_*.csv"))
+    return candidates[-1] if candidates else None
 
 
 # ---------------------------------------------------------------------------

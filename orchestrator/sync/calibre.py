@@ -15,9 +15,13 @@ Custom column names used by this project:
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import psutil
+
+# Suppress console window flashes on Windows for every calibredb call.
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 from orchestrator import config
 
@@ -88,25 +92,90 @@ def fetch_existing_ship_values() -> list[str]:
 # Library writes
 # ---------------------------------------------------------------------------
 
-def add_book(epub_path: Path) -> int:
+def add_book(epub_path: Path, timeout: int | None = None) -> tuple[int, bool]:
     """
     Add an epub to the Calibre library.
 
-    Returns the Calibre book ID assigned to the new entry.
-    Raises RuntimeError if the ID cannot be parsed from calibredb output.
+    Returns ``(calibre_id, is_fresh)`` where ``is_fresh`` is ``True`` when
+    calibredb added the book as a new entry, and ``False`` when the book was
+    already in the library and the existing ID was found via fallback search.
+
+    The ``is_fresh`` flag is used by callers to decide whether to write
+    ``#readstatus`` — existing books may already have a status that should
+    not be overwritten.
+
+    Raises RuntimeError if the ID cannot be determined.
+    Raises subprocess.TimeoutExpired if the operation exceeds timeout seconds
+    (most likely cause: Calibre GUI is holding a library lock).
     """
     result = _run([
         "add",
         "--library-path", str(config.LIBRARY_PATH),
         str(epub_path),
-    ])
+    ], timeout=timeout)
     # calibredb add prints: "Added book ids: 1234"
     match = re.search(r"Added book ids:\s*(\d+)", result.stdout)
-    if not match:
-        raise RuntimeError(
-            f"Could not parse Calibre ID from calibredb add output:\n{result.stdout}"
-        )
-    return int(match.group(1))
+    if match:
+        return int(match.group(1)), True  # genuinely new book
+
+    # Book is likely already in the library (duplicate detected by calibredb).
+    # Try to locate the existing Calibre ID by ao3_work_id in the filename.
+    existing_id = _find_id_from_epub_filename(epub_path)
+    if existing_id is not None:
+        return existing_id, False  # found existing book
+
+    raise RuntimeError(
+        f"Could not parse Calibre ID from calibredb add output "
+        f"(book may already be in library):\n{result.stdout}"
+    )
+
+
+def _find_id_from_epub_filename(epub_path: Path) -> int | None:
+    """
+    Try to find the Calibre ID of a book matching the given epub by looking
+    up its ao3_work_id (extracted from the filename) in the Calibre library.
+
+    Only searches by ``#ao3_work_id`` — not by title — to avoid false matches
+    against pre-existing books that happen to share a title.  Works when the
+    book was imported in a previous run and ao3_work_id was successfully
+    written to Calibre.
+    """
+    stem = epub_path.stem  # e.g. "Haebang-ao3_43968159"
+    m = re.search(r"ao3_(\d+)", stem)
+    if m:
+        return _search_first_calibre_id(f"#ao3_work_id:{m.group(1)}")
+    return None
+
+
+def _search_first_calibre_id(search_expr: str) -> int | None:
+    """Return the first Calibre ID matching the search expression, or None."""
+    try:
+        result = _run([
+            "list",
+            "--library-path", str(config.LIBRARY_PATH),
+            "--search", search_expr,
+            "--fields", "id",
+            "--for-machine",
+        ])
+        books = json.loads(result.stdout)
+        if books:
+            return int(books[0]["id"])
+    except Exception:
+        pass
+    return None
+
+
+def remove_book(calibre_id: int, timeout: int | None = None) -> None:
+    """
+    Remove a book from the Calibre library by ID.
+
+    Used by the end-to-end integration test to clean up test imports.
+    """
+    _run([
+        "remove",
+        "--library-path", str(config.LIBRARY_PATH),
+        str(calibre_id),
+    ], timeout=timeout)
 
 
 def set_custom(calibre_id: int, field: str, value: str | int) -> None:
@@ -162,13 +231,20 @@ def export_csv(output_path: Path) -> None:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _run(args: list[str]) -> subprocess.CompletedProcess:
+def _run(args: list[str], timeout: int | None = None) -> subprocess.CompletedProcess:
     """
     Run calibredb with the given arguments.
+
+    Args:
+        args:    calibredb sub-command and flags.
+        timeout: Optional timeout in seconds. Raises subprocess.TimeoutExpired
+                 if calibredb does not exit within this time. The most common
+                 cause of a hang is the Calibre GUI holding a library lock.
 
     Raises:
         FileNotFoundError: if the calibredb executable does not exist.
         subprocess.CalledProcessError: if calibredb exits with a non-zero code.
+        subprocess.TimeoutExpired: if the process exceeds the timeout.
     """
     cmd = [str(config.CALIBREDB_PATH)] + args
     result = subprocess.run(
@@ -176,6 +252,8 @@ def _run(args: list[str]) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True,
         check=False,
+        timeout=timeout,
+        creationflags=_NO_WINDOW,
     )
     if result.returncode != 0:
         raise subprocess.CalledProcessError(

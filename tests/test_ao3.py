@@ -16,12 +16,14 @@ import pytest
 
 from orchestrator.sync.ao3 import (
     DownloadResult,
+    _cache_epub,
     _is_cloudflare_error,
     _is_credentials_error,
     build_ao3_url,
     download_stories,
     download_story,
     failed_downloads,
+    find_existing_epub,
     successful_downloads,
 )
 
@@ -882,3 +884,176 @@ class TestDownloadResultCredentialsError:
     def test_false_when_no_error(self):
         result = DownloadResult(story=make_story())
         assert result.credentials_error is False
+
+
+# ---------------------------------------------------------------------------
+# find_existing_epub
+# ---------------------------------------------------------------------------
+
+class TestFindExistingEpub:
+    def test_finds_epub_with_work_id_in_filename(self, tmp_path):
+        epub = tmp_path / "My_Story_12345.epub"
+        epub.write_bytes(b"fake epub")
+        result = find_existing_epub("12345", tmp_path)
+        assert result == epub
+
+    def test_returns_none_when_no_match(self, tmp_path):
+        (tmp_path / "other_99999.epub").write_bytes(b"fake epub")
+        assert find_existing_epub("12345", tmp_path) is None
+
+    def test_finds_epub_via_cache_file(self, tmp_path):
+        epub = tmp_path / "Story_Title.epub"
+        epub.write_bytes(b"fake epub")
+        cache = tmp_path / ".fanficflow_cache.json"
+        import json
+        cache.write_text(json.dumps({"12345": "Story_Title.epub"}), encoding="utf-8")
+        result = find_existing_epub("12345", tmp_path)
+        assert result == epub
+
+    def test_cache_hit_but_file_missing_returns_none(self, tmp_path):
+        cache = tmp_path / ".fanficflow_cache.json"
+        import json
+        cache.write_text(json.dumps({"12345": "gone.epub"}), encoding="utf-8")
+        assert find_existing_epub("12345", tmp_path) is None
+
+    def test_filename_glob_takes_priority_over_cache(self, tmp_path):
+        """If both a filename glob match and a cache entry exist, the glob wins."""
+        import json
+        glob_epub = tmp_path / "Story_12345.epub"
+        glob_epub.write_bytes(b"glob match")
+        cache_epub = tmp_path / "CachedName.epub"
+        cache_epub.write_bytes(b"cache match")
+        (tmp_path / ".fanficflow_cache.json").write_text(
+            json.dumps({"12345": "CachedName.epub"}), encoding="utf-8"
+        )
+        result = find_existing_epub("12345", tmp_path)
+        assert result == glob_epub
+
+    def test_creates_output_dir_if_missing(self, tmp_path):
+        missing = tmp_path / "new_dir"
+        assert not missing.exists()
+        find_existing_epub("12345", missing)
+        assert missing.exists()
+
+    def test_returns_none_on_empty_directory(self, tmp_path):
+        assert find_existing_epub("12345", tmp_path) is None
+
+    def test_corrupted_cache_returns_none(self, tmp_path):
+        (tmp_path / ".fanficflow_cache.json").write_text("not json!", encoding="utf-8")
+        assert find_existing_epub("12345", tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# _cache_epub
+# ---------------------------------------------------------------------------
+
+class TestCacheEpub:
+    def test_creates_cache_file(self, tmp_path):
+        import json
+        epub = tmp_path / "story.epub"
+        epub.write_bytes(b"")
+        _cache_epub("12345", epub, tmp_path)
+        cache = json.loads((tmp_path / ".fanficflow_cache.json").read_text())
+        assert cache["12345"] == "story.epub"
+
+    def test_appends_to_existing_cache(self, tmp_path):
+        import json
+        cache_path = tmp_path / ".fanficflow_cache.json"
+        cache_path.write_text(json.dumps({"99999": "other.epub"}), encoding="utf-8")
+        epub = tmp_path / "new.epub"
+        epub.write_bytes(b"")
+        _cache_epub("12345", epub, tmp_path)
+        cache = json.loads(cache_path.read_text())
+        assert cache["99999"] == "other.epub"
+        assert cache["12345"] == "new.epub"
+
+    def test_overwrites_existing_entry(self, tmp_path):
+        import json
+        cache_path = tmp_path / ".fanficflow_cache.json"
+        cache_path.write_text(json.dumps({"12345": "old.epub"}), encoding="utf-8")
+        epub = tmp_path / "new.epub"
+        epub.write_bytes(b"")
+        _cache_epub("12345", epub, tmp_path)
+        cache = json.loads(cache_path.read_text())
+        assert cache["12345"] == "new.epub"
+
+
+# ---------------------------------------------------------------------------
+# download_story — skips already-downloaded epubs
+# ---------------------------------------------------------------------------
+
+class TestDownloadStorySkipsExisting:
+    def test_returns_skipped_when_epub_exists_by_filename(self, tmp_path):
+        story = make_story("12345")
+        epub = tmp_path / "My_Story_12345.epub"
+        epub.write_bytes(b"already downloaded")
+        with patch("subprocess.run") as mock_run:
+            result = download_story(story, tmp_path, fanficfare_cmd="fanficfare")
+        mock_run.assert_not_called()
+        assert result.skipped is True
+        assert result.success is True
+        assert result.epub_path == epub
+
+    def test_returns_skipped_when_epub_exists_in_cache(self, tmp_path):
+        import json
+        story = make_story("12345")
+        epub = tmp_path / "Title_Without_WorkId.epub"
+        epub.write_bytes(b"already downloaded")
+        (tmp_path / ".fanficflow_cache.json").write_text(
+            json.dumps({"12345": "Title_Without_WorkId.epub"}), encoding="utf-8"
+        )
+        with patch("subprocess.run") as mock_run:
+            result = download_story(story, tmp_path, fanficfare_cmd="fanficfare")
+        mock_run.assert_not_called()
+        assert result.skipped is True
+        assert result.epub_path == epub
+
+    def test_not_skipped_default(self, tmp_path):
+        result = DownloadResult(story=make_story())
+        assert result.skipped is False
+
+    def test_downloads_when_no_existing_epub(self, tmp_path):
+        story = make_story("12345")
+        with patch("subprocess.run", side_effect=_fake_run_that_creates_epub(tmp_path, "story.epub")):
+            result = download_story(story, tmp_path, fanficfare_cmd="fanficfare")
+        assert result.skipped is False
+        assert result.success is True
+
+    def test_cache_written_after_fresh_download(self, tmp_path):
+        import json
+        story = make_story("12345")
+        with patch("subprocess.run", side_effect=_fake_run_that_creates_epub(tmp_path, "story.epub")):
+            download_story(story, tmp_path, fanficfare_cmd="fanficfare")
+        cache = json.loads((tmp_path / ".fanficflow_cache.json").read_text())
+        assert cache["12345"] == "story.epub"
+
+
+# ---------------------------------------------------------------------------
+# download_stories — no delay after skipped stories
+# ---------------------------------------------------------------------------
+
+class TestDownloadStoriesSkipDelay:
+    def test_no_delay_after_skipped_story(self, tmp_path):
+        """Skipped (already-downloaded) stories must not trigger inter-story delays."""
+        stories = [make_story("1"), make_story("2"), make_story("3")]
+        sleep_calls = []
+
+        def fake_download(story, output_dir, **kwargs):
+            # story "2" is skipped; others are fresh failures
+            skipped = story["ao3_work_id"] == "2"
+            epub = tmp_path / "2.epub" if skipped else None
+            if skipped:
+                epub.write_bytes(b"")
+            return DownloadResult(story=story, epub_path=epub, skipped=skipped,
+                                  error=None if skipped else "err")
+
+        with patch("orchestrator.sync.ao3.download_story", side_effect=fake_download):
+            with patch("orchestrator.sync.ao3.time.sleep",
+                       side_effect=lambda s: sleep_calls.append(s)):
+                download_stories(
+                    stories, output_dir=tmp_path, batch_size=10,
+                    batch_delay=0, story_delay=5,
+                )
+
+        # Only 1 delay: between story 1 and story 3 (story 2 is skipped, no delay after it)
+        assert sleep_calls.count(5) == 1

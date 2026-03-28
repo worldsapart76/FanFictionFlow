@@ -19,6 +19,7 @@ from orchestrator.export.library_csv import (
     EXPORT_COLUMNS,
     _write_csv,
     export_library_csv,
+    find_latest_csv,
 )
 
 
@@ -212,17 +213,19 @@ class TestExportLibraryCsv:
             result = export_library_csv(output_path=out)
         assert result == out.resolve()
 
-    def test_default_path_uses_config_filename(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+    def test_default_path_uses_timestamped_filename(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "LIBRARY_CSV_PATH", tmp_path / "library_csv.csv")
         with patch("orchestrator.export.library_csv.calibre.fetch_library", return_value=[]):
             result = export_library_csv()
-        assert result.name == config.LIBRARY_CSV_FILENAME
+        assert result.parent == tmp_path.resolve()
+        assert result.name.startswith("library_csv_")
+        assert result.suffix == ".csv"
 
-    def test_default_path_creates_file_in_cwd(self, tmp_path, monkeypatch):
-        monkeypatch.chdir(tmp_path)
+    def test_default_path_creates_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "LIBRARY_CSV_PATH", tmp_path / "library_csv.csv")
         with patch("orchestrator.export.library_csv.calibre.fetch_library", return_value=[]):
             export_library_csv()
-        assert (tmp_path / config.LIBRARY_CSV_FILENAME).exists()
+        assert any(tmp_path.glob("library_csv_*.csv"))
 
     def test_csv_contains_all_books(self, tmp_path):
         books = [_book(id=i, **{"#ao3_work_id": str(i)}) for i in range(20)]
@@ -286,3 +289,29 @@ class TestExportLibraryCsv:
         headers, rows = _read_csv(out)
         assert headers == EXPORT_COLUMNS
         assert rows == []
+
+
+class TestFindLatestCsv:
+    def test_returns_none_when_no_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "LIBRARY_CSV_PATH", tmp_path / "library_csv.csv")
+        assert find_latest_csv() is None
+
+    def test_returns_only_file(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "LIBRARY_CSV_PATH", tmp_path / "library_csv.csv")
+        f = tmp_path / "library_csv_20260101_120000.csv"
+        f.touch()
+        assert find_latest_csv() == f
+
+    def test_returns_most_recent_by_timestamp(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "LIBRARY_CSV_PATH", tmp_path / "library_csv.csv")
+        older = tmp_path / "library_csv_20260101_120000.csv"
+        newer = tmp_path / "library_csv_20260328_090000.csv"
+        older.touch()
+        newer.touch()
+        assert find_latest_csv() == newer
+
+    def test_ignores_non_matching_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(config, "LIBRARY_CSV_PATH", tmp_path / "library_csv.csv")
+        (tmp_path / "library_csv.csv").touch()
+        (tmp_path / "other.csv").touch()
+        assert find_latest_csv() is None

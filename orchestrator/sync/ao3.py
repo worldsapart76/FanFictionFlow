@@ -16,11 +16,31 @@ AO3 work URL format:
 
 from __future__ import annotations
 
+import json
 import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
+
+_NO_WINDOW = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+
+_CACHE_FILENAME = ".fanficflow_cache.json"
+
+
+def _interruptible_sleep(seconds: int, cancel_event: threading.Event | None) -> bool:
+    """
+    Sleep for up to `seconds`, waking immediately if cancel_event is set.
+
+    Returns True if the sleep was cut short by a cancel signal, False if the
+    full duration elapsed normally.
+    """
+    if cancel_event is None:
+        time.sleep(seconds)
+        return False
+    return cancel_event.wait(timeout=seconds)
 
 from orchestrator import config
 
@@ -39,6 +59,7 @@ class DownloadResult:
     story: dict                        # original story dict from diff.py
     epub_path: Path | None = field(default=None)  # None if download failed
     error: str | None = field(default=None)
+    skipped: bool = field(default=False)  # True when an existing epub was reused
 
     @property
     def success(self) -> bool:
@@ -58,6 +79,61 @@ class DownloadResult:
 def build_ao3_url(work_id: str) -> str:
     """Return the canonical AO3 work URL for the given work ID."""
     return AO3_WORK_URL.format(work_id=work_id)
+
+
+# ---------------------------------------------------------------------------
+# Pre-download epub detection
+# ---------------------------------------------------------------------------
+
+
+def find_existing_epub(work_id: str, output_dir: Path) -> Path | None:
+    """
+    Return an epub already present in output_dir for the given work_id, or None.
+
+    Two checks are performed in order:
+
+    1. Glob for ``*<work_id>*.epub`` — catches files where FanFicFare included
+       the work ID in the filename (common) and any epub the user manually placed
+       there and named to include the work ID.
+
+    2. Cache lookup in ``.fanficflow_cache.json`` — catches previously downloaded
+       files whose names don't contain the work ID.  This file is written by
+       ``_cache_epub`` after every successful download.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Filename contains the work_id.
+    matches = list(output_dir.glob(f"*{work_id}*.epub"))
+    if matches:
+        return max(matches, key=lambda p: p.stat().st_mtime)
+
+    # 2. Cache file mapping.
+    cache_path = output_dir / _CACHE_FILENAME
+    if cache_path.exists():
+        try:
+            cache: dict = json.loads(cache_path.read_text(encoding="utf-8"))
+            name = cache.get(work_id)
+            if name:
+                cached = output_dir / name
+                if cached.exists():
+                    return cached
+        except Exception:
+            pass
+
+    return None
+
+
+def _cache_epub(work_id: str, epub_path: Path, output_dir: Path) -> None:
+    """Record work_id → filename in the download cache after a successful download."""
+    cache_path = output_dir / _CACHE_FILENAME
+    try:
+        cache: dict = {}
+        if cache_path.exists():
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        cache[work_id] = epub_path.name
+        cache_path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -119,6 +195,8 @@ def download_story(
     extra_options: list[str] | None = None,
     retry_count: int | None = None,
     retry_delay: int | None = None,
+    cancel_event: threading.Event | None = None,
+    status_callback: Callable[[str], None] | None = None,
 ) -> DownloadResult:
     """
     Download one AO3 story as an epub via the FanFicFare CLI.
@@ -165,6 +243,11 @@ def download_story(
     url = build_ao3_url(work_id)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Check whether this story was already downloaded (previous run or manual).
+    existing = find_existing_epub(work_id, output_dir)
+    if existing is not None:
+        return DownloadResult(story=story, epub_path=existing, skipped=True)
+
     # Snapshot taken once before any attempt so the epub detector works
     # correctly even if a partial file appears and disappears across retries.
     before: set[Path] = set(output_dir.glob("*.epub"))
@@ -181,6 +264,7 @@ def download_story(
                 check=False,
                 timeout=timeout,
                 cwd=str(output_dir),
+                creationflags=_NO_WINDOW,
             )
         except FileNotFoundError:
             return DownloadResult(
@@ -212,6 +296,7 @@ def download_story(
             # More than one new file is unexpected but possible for very long
             # stories that FanFicFare splits. Pick the most recently modified.
             epub_path = max(new_files, key=lambda p: p.stat().st_mtime)
+            _cache_epub(work_id, epub_path, output_dir)
             return DownloadResult(story=story, epub_path=epub_path)
 
         # Non-zero exit.
@@ -221,7 +306,13 @@ def download_story(
         if (_is_cloudflare_error(combined_output) or _is_credentials_error(combined_output)) and attempt < max_attempts:
             # Transient error: Cloudflare block or Cloudflare blocking the AO3
             # login endpoint. Both are retryable — wait and try again.
-            time.sleep(retry_delay)
+            if status_callback:
+                status_callback(
+                    f"  Cloudflare error on attempt {attempt} — "
+                    f"retrying in {retry_delay}s…"
+                )
+            if _interruptible_sleep(retry_delay, cancel_event):
+                return DownloadResult(story=story, error="Cancelled during retry wait")
             continue
 
         # Non-retryable failure, or Cloudflare retries exhausted.
@@ -256,6 +347,8 @@ def download_stories(
     retry_count: int | None = None,
     retry_delay: int | None = None,
     progress_callback: Callable[[DownloadResult], None] | None = None,
+    cancel_event: threading.Event | None = None,
+    status_callback: Callable[[str], None] | None = None,
 ) -> list[DownloadResult]:
     """
     Download a list of AO3 stories as epubs, in batches with delays.
@@ -324,14 +417,28 @@ def download_stories(
 
     results: list[DownloadResult] = []
     total = len(stories)
+    cancelled = False
 
     for batch_start in range(0, total, batch_size):
+        if cancelled:
+            break
         batch = stories[batch_start : batch_start + batch_size]
 
         for batch_pos, story in enumerate(batch):
+            # Check for cancellation before starting each story.
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                break
+
             story_index = batch_start + batch_pos  # 0-based index across whole run
             is_last_story = (story_index == total - 1)
             is_last_in_batch = (batch_pos == len(batch) - 1)
+
+            title = story.get("title") or story["ao3_work_id"]
+            if status_callback is not None:
+                status_callback(
+                    f"[{story_index + 1}/{total}] Downloading: {title!r}"
+                )
 
             result = download_story(
                 story,
@@ -341,26 +448,48 @@ def download_stories(
                 extra_options=extra_options,
                 retry_count=retry_count,
                 retry_delay=retry_delay,
+                cancel_event=cancel_event,
+                status_callback=status_callback,
             )
             results.append(result)
             if progress_callback is not None:
                 progress_callback(result)
+
+            # Skipped stories (already downloaded) don't count as network
+            # activity, so no delay is needed after them.
+            if result.skipped:
+                continue
 
             if is_last_story:
                 # No delay after the very last story.
                 break
 
             if is_last_in_batch:
-                # End of a batch (but not the end of the run): story_delay +
-                # batch_delay gives a longer cooldown between batches.
+                # End of a batch: story_delay + batch_delay gives a longer
+                # cooldown between batches.
                 if story_delay > 0:
-                    time.sleep(story_delay)
-                if batch_delay > 0:
-                    time.sleep(batch_delay)
+                    if status_callback is not None:
+                        status_callback(
+                            f"  Batch complete — waiting {story_delay}s "
+                            f"(story delay) + {batch_delay}s (batch cooldown)…"
+                        )
+                    if _interruptible_sleep(story_delay, cancel_event):
+                        cancelled = True
+                        break
+                if batch_delay > 0 and not cancelled:
+                    if _interruptible_sleep(batch_delay, cancel_event):
+                        cancelled = True
+                        break
             else:
                 # Mid-batch: standard per-story delay.
                 if story_delay > 0:
-                    time.sleep(story_delay)
+                    if status_callback is not None:
+                        status_callback(
+                            f"  Waiting {story_delay}s before next download…"
+                        )
+                    if _interruptible_sleep(story_delay, cancel_event):
+                        cancelled = True
+                        break
 
     return results
 

@@ -34,13 +34,13 @@ BOOX_DEVICE_PATH: str = "/sdcard/Books"  # destination directory on the Palma
 # ---------------------------------------------------------------------------
 
 MARKED_FOR_LATER_FILENAME = "marked_for_later.csv"
-READ_STATUS_EXPORT_FILENAME = "read_status_export.csv"
+PALMA_READSTATUS_FILENAME = "palma_readstatus_overrides.csv"
 
 # ---------------------------------------------------------------------------
 # Output file names
 # ---------------------------------------------------------------------------
 
-LIBRARY_CSV_FILENAME = "library_csv.csv"
+LIBRARY_CSV_PATH: Path = Path.home() / ".fanficflow" / "library_csv.csv"
 
 # ---------------------------------------------------------------------------
 # FanFicFare — download settings
@@ -79,7 +79,7 @@ FANFICFARE_RETRY_DELAY: int = 60     # seconds to wait before each retry
 # ---------------------------------------------------------------------------
 
 # Default #readstatus written to Calibre for newly imported stories.
-DEFAULT_READ_STATUS: str = "unread"
+DEFAULT_READ_STATUS: str = "Unread"
 
 # ---------------------------------------------------------------------------
 # Ship normalization — shortname override table (user-editable)

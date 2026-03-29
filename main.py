@@ -425,7 +425,9 @@ class FanFictionFlowApp:
             already_present: list[ao3.DownloadResult] = []
             need_download: list[dict] = []
             for story in new_stories:
-                existing = ao3.find_existing_epub(story["ao3_work_id"], epub_dir)
+                existing = ao3.find_existing_epub(
+                    story["ao3_work_id"], epub_dir, title=story.get("title", "")
+                )
                 if existing is not None:
                     already_present.append(
                         ao3.DownloadResult(story=story, epub_path=existing, skipped=True)
@@ -671,7 +673,9 @@ class FanFictionFlowApp:
             already_present: list[ao3.DownloadResult] = []
             need_download: list[dict] = []
             for story in new_stories:
-                existing = ao3.find_existing_epub(story["ao3_work_id"], epub_dir)
+                existing = ao3.find_existing_epub(
+                    story["ao3_work_id"], epub_dir, title=story.get("title", "")
+                )
                 if existing is not None:
                     already_present.append(
                         ao3.DownloadResult(story=story, epub_path=existing, skipped=True)
@@ -787,7 +791,9 @@ class FanFictionFlowApp:
             # Find epubs already in the download folder for each story.
             successful_dl: list[ao3.DownloadResult] = []
             for story in new_stories:
-                epub = ao3.find_existing_epub(story["ao3_work_id"], epub_dir)
+                epub = ao3.find_existing_epub(
+                    story["ao3_work_id"], epub_dir, title=story.get("title", "")
+                )
                 if epub is not None:
                     successful_dl.append(ao3.DownloadResult(story=story, epub_path=epub))
                 else:
@@ -913,6 +919,7 @@ class FanFictionFlowApp:
             # Build rename map: FanFicFare names → Calibre names so the
             # Android app can match files to the library CSV by Calibre ID.
             rename_map: dict[Path, str] = {}
+            epub_paths_to_transfer = epub_paths
             if epub_paths:
                 self._log_line("  Looking up Calibre IDs for epub rename…")
                 try:
@@ -931,13 +938,14 @@ class FanFictionFlowApp:
                                     int(book["id"]),
                                     book.get("title") or str(book["id"]),
                                 )
+                    epub_paths_to_transfer = list(rename_map.keys())
                 except Exception as exc:
                     self._log_line(
                         f"  Warning: Calibre lookup failed, using original filenames: {exc}"
                     )
 
             transfer_result = boox_transfer.transfer_to_boox(
-                epub_paths, csv_path=csv_path, rename_map=rename_map
+                epub_paths_to_transfer, csv_path=csv_path, rename_map=rename_map
             )
             self._log_line(
                 f"  Boox: {len(transfer_result.copied)} file(s) pushed."
@@ -1207,7 +1215,7 @@ class FanFictionFlowApp:
             self._log_line("Checking for Boox Palma…")
             try:
                 transfer_result = boox_transfer.transfer_to_boox(
-                    epub_paths,
+                    list(rename_map.keys()),
                     csv_path=csv_path,
                     rename_map=rename_map,
                 )
@@ -1222,8 +1230,12 @@ class FanFictionFlowApp:
                 self._log_line(f"  Boox transfer error: {exc}")
 
             self._log_line("")
-            self._log_line("Sync complete.")
-            self._set_status("Sync complete", "green")
+            if failed_meta:
+                self._log_line("Sync complete — metadata errors.")
+                self._set_status("Sync complete — metadata errors", "orange")
+            else:
+                self._log_line("Sync complete.")
+                self._set_status("Sync complete", "green")
             curation = browser_module.curation_needed(rs_result) if rs_result else []
             if curation:
                 self.root.after(

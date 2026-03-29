@@ -17,6 +17,7 @@ AO3 work URL format:
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import threading
@@ -86,11 +87,19 @@ def build_ao3_url(work_id: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def find_existing_epub(work_id: str, output_dir: Path) -> Path | None:
+def _normalize_title_for_match(s: str) -> str:
+    """Normalize a title or filename stem for loose title-based matching."""
+    s = s.lower()
+    s = re.sub(r"[-_\s]+", " ", s)    # unify separators to single space
+    s = re.sub(r"[^a-z0-9 ]", "", s)  # strip punctuation
+    return s.strip()
+
+
+def find_existing_epub(work_id: str, output_dir: Path, title: str = "") -> Path | None:
     """
     Return an epub already present in output_dir for the given work_id, or None.
 
-    Two checks are performed in order:
+    Three checks are performed in order:
 
     1. Glob for ``*<work_id>*.epub`` — catches files where FanFicFare included
        the work ID in the filename (common) and any epub the user manually placed
@@ -99,6 +108,13 @@ def find_existing_epub(work_id: str, output_dir: Path) -> Path | None:
     2. Cache lookup in ``.fanficflow_cache.json`` — catches previously downloaded
        files whose names don't contain the work ID.  This file is written by
        ``_cache_epub`` after every successful download.
+
+    3. Title-based fuzzy match (only when ``title`` is provided) — catches
+       manually downloaded files whose names don't contain the work ID and
+       aren't in the cache.  Normalises both the story title and each epub
+       filename stem (lowercased, separators unified, punctuation stripped)
+       before comparing.  When a match is found, the work_id → filename
+       mapping is written to the cache so future runs use check 2 instead.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -119,6 +135,17 @@ def find_existing_epub(work_id: str, output_dir: Path) -> Path | None:
                     return cached
         except Exception:
             pass
+
+    # 3. Title-based fuzzy match for manually downloaded files.
+    if title:
+        normalized_title = _normalize_title_for_match(title)
+        if normalized_title:
+            for epub in sorted(output_dir.glob("*.epub"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if epub.name == _CACHE_FILENAME:
+                    continue
+                if _normalize_title_for_match(epub.stem) == normalized_title:
+                    _cache_epub(work_id, epub, output_dir)
+                    return epub
 
     return None
 
@@ -229,7 +256,7 @@ def download_story(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Check whether this story was already downloaded (previous run or manual).
-    existing = find_existing_epub(work_id, output_dir)
+    existing = find_existing_epub(work_id, output_dir, title=story.get("title", ""))
     if existing is not None:
         return DownloadResult(story=story, epub_path=existing, skipped=True)
 

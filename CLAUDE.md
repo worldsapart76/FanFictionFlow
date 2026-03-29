@@ -231,6 +231,8 @@ All milestones 1–11, Palma read status sync, and Phase 2 browser openers are c
 | `credentials.py` | Read/write AO3 credentials to FanFicFare's `personal.ini` |
 | `main.py` | tkinter GUI; two-phase sync; Steps tab for individual re-runs; state persistence |
 
+**Known failure mode — silent metadata write:** `write_metadata()` catches all exceptions per-book and returns an error result. `_phase2_background()` previously logged these failures but still showed green "Sync complete" (fixed: now shows amber "Sync complete — metadata errors" when any metadata write fails). Most likely trigger: Calibre GUI opened during the review queue review period, causing a calibredb lock when the user confirmed. Recovery: re-run Import & Review from the Steps tab — `_find_id_from_epub_filename()` now has a title-based fallback to locate already-imported books whose `#ao3_work_id` was never written, so the sync can proceed and write the metadata correctly.
+
 **Runtime files** (all under `C:\Users\world\.fanficflow\`):
 - `settings.json` — epub dir path, marked_for_later path, palma_readstatus_path; persisted across restarts
 - `sync_state.json` — diff + import state; enables Steps tab to resume across restarts
@@ -313,3 +315,4 @@ Scripts must be in PATH — pip-installed executables (fanficfare, etc.) live in
 - Do not write `#readstatus` to existing Calibre books during sync — only `fresh_calibre_ids` (genuinely new imports) receive a `#readstatus` write via `write_all_metadata`. Violating this resets the entire library to "Unread".
 - Do not sync `"Unread"` from the Palma CSV back to Calibre — the Android app exports all books with "Unread" as the default; syncing it overwrites deliberate statuses. Only non-default statuses (Read, Favorite, DNF, Priority) are synced.
 - Do not write raw status strings from user input or CSV to Calibre — always pass through `_normalize_status()` first (`"DNF"` → all-caps, everything else → title case).
+- Do not show green "Sync complete" when `failed_meta` is non-empty in `_phase2_background()` — use amber "Sync complete — metadata errors" so the user knows to re-run Import & Review.

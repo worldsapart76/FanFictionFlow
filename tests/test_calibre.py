@@ -153,9 +153,20 @@ class TestAddBook:
         assert calibre_id == 99
         assert is_fresh is False
 
+    def test_falls_back_to_title_search_when_ao3_work_id_not_set(self):
+        """If ao3_work_id search returns nothing, title search finds the existing book."""
+        no_id_result = _make_completed_process(stdout="DeDRM output only\n")
+        empty_ao3 = _make_completed_process(stdout="[]")       # ao3_work_id search
+        found_title = _make_completed_process(stdout='[{"id": 77}]')  # title search
+        with patch("orchestrator.sync.calibre._run",
+                   side_effect=[no_id_result, empty_ao3, found_title]):
+            calibre_id, is_fresh = calibre.add_book(Path("Trust Fall-ao3_67301515.epub"))
+        assert calibre_id == 77
+        assert is_fresh is False
+
     def test_raises_if_id_not_in_output_and_no_fallback(self):
         no_id_result = _make_completed_process(stdout="Some unexpected output\n")
-        # Fallback search also returns nothing
+        # Both ao3_work_id search (via title fallback) and title search return nothing
         empty_result = _make_completed_process(stdout="[]")
         with patch("orchestrator.sync.calibre._run", side_effect=[no_id_result, empty_result]):
             with pytest.raises(RuntimeError, match="Could not parse Calibre ID"):

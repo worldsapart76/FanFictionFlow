@@ -707,6 +707,41 @@ class TestFindExistingEpub:
         (tmp_path / ".fanficflow_cache.json").write_text("not json!", encoding="utf-8")
         assert find_existing_epub("12345", tmp_path) is None
 
+    def test_finds_manually_downloaded_epub_by_title(self, tmp_path):
+        """Title match catches manually downloaded files without work_id in name."""
+        epub = tmp_path / "Our_Kingdom.epub"
+        epub.write_bytes(b"fake epub")
+        result = find_existing_epub("99999", tmp_path, title="Our Kingdom")
+        assert result == epub
+
+    def test_title_match_with_punctuation_differences(self, tmp_path):
+        """Title normalisation strips punctuation on both sides."""
+        epub = tmp_path / "Where_Loyalties_Lie.epub"
+        epub.write_bytes(b"fake epub")
+        result = find_existing_epub("11111", tmp_path, title="Where Loyalties Lie")
+        assert result == epub
+
+    def test_title_match_caches_result(self, tmp_path):
+        """A title-matched epub is written to the cache for future runs."""
+        import json
+        epub = tmp_path / "Trust_Fall.epub"
+        epub.write_bytes(b"fake epub")
+        find_existing_epub("67301515", tmp_path, title="Trust Fall")
+        cache = json.loads((tmp_path / ".fanficflow_cache.json").read_text())
+        assert cache.get("67301515") == "Trust_Fall.epub"
+
+    def test_title_match_not_used_when_title_empty(self, tmp_path):
+        """Without a title argument the third check is skipped."""
+        (tmp_path / "Our_Kingdom.epub").write_bytes(b"fake epub")
+        assert find_existing_epub("99999", tmp_path) is None
+
+    def test_title_match_skipped_when_work_id_in_filename(self, tmp_path):
+        """Check 1 short-circuits before reaching title match."""
+        epub = tmp_path / "story-ao3_99999.epub"
+        epub.write_bytes(b"fake epub")
+        result = find_existing_epub("99999", tmp_path, title="Our Kingdom")
+        assert result == epub
+
 
 # ---------------------------------------------------------------------------
 # _cache_epub

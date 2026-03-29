@@ -34,6 +34,8 @@ def _book(**overrides) -> dict:
         "id": 1,
         "title": "Test Story",
         "authors": "Test Author",
+        "tags": "tag1, tag2",
+        "comments": "A story description.",
         "#ao3_work_id": "12345",
         "#collection": "Hunger Games",
         "#primaryship": "Katniss/Peeta",
@@ -61,7 +63,7 @@ def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
 class TestExportColumns:
     def test_contains_all_expected_columns(self):
         expected = {
-            "id", "title", "authors",
+            "id", "title", "authors", "tags", "comments",
             "#ao3_work_id", "#collection", "#primaryship",
             "#wordcount", "#readstatus",
         }
@@ -130,12 +132,10 @@ class TestWriteCsv:
     def test_extra_calibre_fields_ignored(self, tmp_path):
         out = tmp_path / "out.csv"
         book = _book()
-        book["tags"] = "some_tag"
         book["series"] = "My Series"
         book["#custom_extra"] = "extra"
         _write_csv([book], out)
         headers, rows = _read_csv(out)
-        assert "tags" not in headers
         assert "series" not in headers
         assert "#custom_extra" not in headers
 

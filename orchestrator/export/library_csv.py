@@ -31,6 +31,8 @@ EXPORT_COLUMNS: list[str] = [
     "id",
     "title",
     "authors",
+    "tags",
+    "comments",
     "#ao3_work_id",
     "#collection",
     "#primaryship",

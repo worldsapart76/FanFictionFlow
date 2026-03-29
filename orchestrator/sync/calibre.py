@@ -51,8 +51,8 @@ def fetch_library() -> list[dict]:
     Return all books in the Calibre library as a list of dicts.
 
     Each dict contains at minimum:
-      id, title, authors, #ao3_work_id, #collection, #primaryship,
-      #wordcount, #readstatus
+      id, title, authors, tags, comments, #ao3_work_id, #collection,
+      #primaryship, #wordcount, #readstatus
 
     Note: calibredb list returns custom columns with a '*' prefix
     (e.g. '*ao3_work_id'). This function normalizes those keys to '#'
@@ -61,7 +61,7 @@ def fetch_library() -> list[dict]:
     result = _run([
         "list",
         "--library-path", str(config.LIBRARY_PATH),
-        "--fields", "id,title,authors,*ao3_work_id,*collection,*primaryship,*wordcount,*readstatus",
+        "--fields", "id,title,authors,tags,comments,*ao3_work_id,*collection,*primaryship,*wordcount,*readstatus",
         "--for-machine",  # JSON output
     ])
     books = json.loads(result.stdout)
@@ -136,18 +136,37 @@ def add_book(epub_path: Path, timeout: int | None = None) -> tuple[int, bool]:
 
 def _find_id_from_epub_filename(epub_path: Path) -> int | None:
     """
-    Try to find the Calibre ID of a book matching the given epub by looking
-    up its ao3_work_id (extracted from the filename) in the Calibre library.
+    Try to find the Calibre ID of a book matching the given epub.
 
-    Only searches by ``#ao3_work_id`` — not by title — to avoid false matches
-    against pre-existing books that happen to share a title.  Works when the
-    book was imported in a previous run and ao3_work_id was successfully
-    written to Calibre.
+    Two searches are attempted in order:
+
+    1. ``#ao3_work_id`` lookup (primary) — works when the book was previously
+       imported and ``#ao3_work_id`` was written to Calibre.
+
+    2. Title search (fallback) — handles the case where ``calibredb add``
+       completed in a prior run but the review-queue confirmation (and thus
+       the metadata write) never ran, leaving ``#ao3_work_id`` unset.  The
+       title is derived from the epub filename:
+         - FanFicFare naming (``title-ao3_NNNNNN``): strip the ``-ao3_NNNNNN``
+           suffix.
+         - Manually downloaded files: use the whole stem with underscores
+           replaced by spaces.
     """
-    stem = epub_path.stem  # e.g. "Haebang-ao3_43968159"
+    stem = epub_path.stem  # e.g. "Trust Fall-ao3_67301515"
     m = re.search(r"ao3_(\d+)", stem)
     if m:
-        return _search_first_calibre_id(f"#ao3_work_id:{m.group(1)}")
+        result = _search_first_calibre_id(f"#ao3_work_id:{m.group(1)}")
+        if result is not None:
+            return result
+
+    # Fallback: derive a title from the filename and search by it.
+    if m:
+        title = stem[:m.start()].rstrip("- ")
+    else:
+        title = stem.replace("_", " ").strip()
+
+    if title:
+        return _search_first_calibre_id(f"title:={title}")
     return None
 
 

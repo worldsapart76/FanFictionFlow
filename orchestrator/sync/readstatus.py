@@ -94,6 +94,9 @@ def _normalize_status(status: str) -> str:
 @dataclass
 class ReadStatusSyncResult:
     updated: list[int] = field(default_factory=list)
+    updated_titles: dict[int, str] = field(default_factory=dict)        # cid → title
+    updated_ao3_work_ids: dict[int, str] = field(default_factory=dict)  # cid → ao3_work_id
+    updated_statuses: dict[int, str] = field(default_factory=dict)      # cid → normalized status
     skipped: list[int] = field(default_factory=list)
     failed: list[tuple[int, str]] = field(default_factory=list)
 
@@ -112,6 +115,7 @@ def sync_readstatus_from_palma(path: Path) -> ReadStatusSyncResult:
         int(book["id"]): (book.get("#readstatus") or "").strip()
         for book in library
     }
+    book_meta: dict[int, dict] = {int(book["id"]): book for book in library}
 
     result = ReadStatusSyncResult()
 
@@ -136,7 +140,15 @@ def sync_readstatus_from_palma(path: Path) -> ReadStatusSyncResult:
 
         try:
             calibre.set_custom(cid, "#readstatus", normalized)
+            try:
+                calibre.touch_last_modified(cid)
+            except Exception:
+                pass  # Non-critical — readstatus was written successfully
             result.updated.append(cid)
+            b = book_meta.get(cid, {})
+            result.updated_titles[cid] = (b.get("title") or "").strip()
+            result.updated_ao3_work_ids[cid] = (b.get("#ao3_work_id") or "").strip()
+            result.updated_statuses[cid] = normalized
         except Exception as exc:
             result.failed.append((cid, str(exc)))
 

@@ -193,8 +193,6 @@ def download_story(
     timeout: int | None = None,
     fanficfare_cmd: str | None = None,
     extra_options: list[str] | None = None,
-    retry_count: int | None = None,
-    retry_delay: int | None = None,
     cancel_event: threading.Event | None = None,
     status_callback: Callable[[str], None] | None = None,
 ) -> DownloadResult:
@@ -204,11 +202,9 @@ def download_story(
     Detects the output file by comparing directory contents before and after
     the download — this is reliable regardless of FanFicFare's filename logic.
 
-    AO3 sits behind Cloudflare, which can return transient errors (most
-    commonly 525 SSL Handshake Failed). When a Cloudflare error is detected,
-    the download is retried up to retry_count times with a retry_delay second
-    wait between attempts. Non-Cloudflare failures (deleted story, login
-    required, FanFicFare stall timeout) are not retried.
+    Failures are not retried. Any failure (Cloudflare error, login block,
+    deleted story, timeout) is returned immediately so the caller can send
+    the story to the Phase 2 browser opener queue.
 
     Args:
         story:          Story dict (must contain 'ao3_work_id').
@@ -217,16 +213,9 @@ def download_story(
                         config.FANFICFARE_TIMEOUT.
         fanficfare_cmd: FanFicFare executable name or path. Defaults to
                         config.FANFICFARE_CMD.
-        retry_count:    Max retries on Cloudflare errors. Defaults to
-                        config.FANFICFARE_RETRY_COUNT.
-        retry_delay:    Seconds to wait before each retry. Defaults to
-                        config.FANFICFARE_RETRY_DELAY.
 
     Returns:
         DownloadResult with epub_path set on success, error set on failure.
-        If all retries are exhausted, the error message includes the attempt
-        count so the caller can distinguish a persistent CF error from a
-        one-shot failure.
     """
     if timeout is None:
         timeout = config.FANFICFARE_TIMEOUT
@@ -234,10 +223,6 @@ def download_story(
         fanficfare_cmd = config.FANFICFARE_CMD
     if extra_options is None:
         extra_options = config.FANFICFARE_EXTRA_OPTIONS
-    if retry_count is None:
-        retry_count = config.FANFICFARE_RETRY_COUNT
-    if retry_delay is None:
-        retry_delay = config.FANFICFARE_RETRY_DELAY
 
     work_id = story["ao3_work_id"]
     url = build_ao3_url(work_id)
@@ -248,86 +233,55 @@ def download_story(
     if existing is not None:
         return DownloadResult(story=story, epub_path=existing, skipped=True)
 
-    # Snapshot taken once before any attempt so the epub detector works
-    # correctly even if a partial file appears and disappears across retries.
     before: set[Path] = set(output_dir.glob("*.epub"))
-
-    max_attempts = 1 + retry_count
     option_flags = [flag for opt in extra_options for flag in ("-o", opt)]
 
-    for attempt in range(1, max_attempts + 1):
-        try:
-            proc = subprocess.run(
-                [fanficfare_cmd, *option_flags, url],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=timeout,
-                cwd=str(output_dir),
-                creationflags=_NO_WINDOW,
-            )
-        except FileNotFoundError:
+    try:
+        proc = subprocess.run(
+            [fanficfare_cmd, *option_flags, url],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=str(output_dir),
+            creationflags=_NO_WINDOW,
+        )
+    except FileNotFoundError:
+        return DownloadResult(
+            story=story,
+            error=(
+                f"FanFicFare executable not found: {fanficfare_cmd!r}. "
+                "Install it with: pip install fanficfare"
+            ),
+        )
+    except subprocess.TimeoutExpired:
+        return DownloadResult(
+            story=story,
+            error=f"FanFicFare timed out after {timeout} s (work_id={work_id})",
+        )
+
+    if proc.returncode == 0:
+        after: set[Path] = set(output_dir.glob("*.epub"))
+        new_files = after - before
+        if not new_files:
             return DownloadResult(
                 story=story,
                 error=(
-                    f"FanFicFare executable not found: {fanficfare_cmd!r}. "
-                    "Install it with: pip install fanficfare"
+                    "FanFicFare reported success but no new epub was found "
+                    f"in {output_dir} (work_id={work_id})"
                 ),
             )
-        except subprocess.TimeoutExpired:
-            # Stall timeout — not a CF error, do not retry.
-            return DownloadResult(
-                story=story,
-                error=f"FanFicFare timed out after {timeout} s (work_id={work_id})",
-            )
+        # More than one new file is unexpected but possible for very long
+        # stories that FanFicFare splits. Pick the most recently modified.
+        epub_path = max(new_files, key=lambda p: p.stat().st_mtime)
+        _cache_epub(work_id, epub_path, output_dir)
+        return DownloadResult(story=story, epub_path=epub_path)
 
-        if proc.returncode == 0:
-            # Success — detect the new epub.
-            after: set[Path] = set(output_dir.glob("*.epub"))
-            new_files = after - before
-            if not new_files:
-                return DownloadResult(
-                    story=story,
-                    error=(
-                        "FanFicFare reported success but no new epub was found "
-                        f"in {output_dir} (work_id={work_id})"
-                    ),
-                )
-            # More than one new file is unexpected but possible for very long
-            # stories that FanFicFare splits. Pick the most recently modified.
-            epub_path = max(new_files, key=lambda p: p.stat().st_mtime)
-            _cache_epub(work_id, epub_path, output_dir)
-            return DownloadResult(story=story, epub_path=epub_path)
-
-        # Non-zero exit.
-        combined_output = proc.stderr + proc.stdout
-        detail = (proc.stderr.strip() or proc.stdout.strip() or "no output")
-
-        if (_is_cloudflare_error(combined_output) or _is_credentials_error(combined_output)) and attempt < max_attempts:
-            # Transient error: Cloudflare block or Cloudflare blocking the AO3
-            # login endpoint. Both are retryable — wait and try again.
-            if status_callback:
-                status_callback(
-                    f"  Cloudflare error on attempt {attempt} — "
-                    f"retrying in {retry_delay}s…"
-                )
-            if _interruptible_sleep(retry_delay, cancel_event):
-                return DownloadResult(story=story, error="Cancelled during retry wait")
-            continue
-
-        # Non-retryable failure, or Cloudflare retries exhausted.
-        if attempt > 1:
-            error = (
-                f"FanFicFare exited with code {proc.returncode} after "
-                f"{attempt} attempt(s) (work_id={work_id}): {detail}"
-            )
-        else:
-            error = f"FanFicFare exited with code {proc.returncode}: {detail}"
-
-        return DownloadResult(story=story, error=error)
-
-    # Unreachable — loop always returns — but satisfies the type checker.
-    return DownloadResult(story=story, error="Unexpected retry loop exit")
+    detail = (proc.stderr.strip() or proc.stdout.strip() or "no output")
+    return DownloadResult(
+        story=story,
+        error=f"FanFicFare exited with code {proc.returncode}: {detail}",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -344,8 +298,6 @@ def download_stories(
     timeout: int | None = None,
     fanficfare_cmd: str | None = None,
     extra_options: list[str] | None = None,
-    retry_count: int | None = None,
-    retry_delay: int | None = None,
     progress_callback: Callable[[DownloadResult], None] | None = None,
     cancel_event: threading.Event | None = None,
     status_callback: Callable[[str], None] | None = None,
@@ -368,8 +320,8 @@ def download_stories(
     FanFicFare can also stall after a handful of sequential downloads;
     the batch structure with its delays helps prevent this too.
 
-    Cloudflare transient errors (e.g. 525 SSL Handshake Failed) are retried
-    automatically per story. See download_story() for retry semantics.
+    Failures are not retried — any failed story is returned as-is for the
+    Phase 2 browser opener queue.
 
     Args:
         stories:           Story dicts from diff.py (each must have 'ao3_work_id').
@@ -386,10 +338,6 @@ def download_stories(
                            config.FANFICFARE_TIMEOUT.
         fanficfare_cmd:    FanFicFare executable. Defaults to
                            config.FANFICFARE_CMD.
-        retry_count:       Max retries per story on Cloudflare errors. Defaults
-                           to config.FANFICFARE_RETRY_COUNT.
-        retry_delay:       Seconds to wait before each retry. Defaults to
-                           config.FANFICFARE_RETRY_DELAY.
         progress_callback: Called with each DownloadResult immediately after
                            it completes (before any post-story sleep).
 
@@ -410,10 +358,6 @@ def download_stories(
         fanficfare_cmd = config.FANFICFARE_CMD
     if extra_options is None:
         extra_options = config.FANFICFARE_EXTRA_OPTIONS
-    if retry_count is None:
-        retry_count = config.FANFICFARE_RETRY_COUNT
-    if retry_delay is None:
-        retry_delay = config.FANFICFARE_RETRY_DELAY
 
     results: list[DownloadResult] = []
     total = len(stories)
@@ -446,8 +390,6 @@ def download_stories(
                 timeout=timeout,
                 fanficfare_cmd=fanficfare_cmd,
                 extra_options=extra_options,
-                retry_count=retry_count,
-                retry_delay=retry_delay,
                 cancel_event=cancel_event,
                 status_callback=status_callback,
             )

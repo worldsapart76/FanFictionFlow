@@ -44,10 +44,10 @@ This Android app consumes the Calibre library CSV export and the epub files. **A
 - **Python only** for the orchestrator. No Node, no Electron.
 - **Calibre stays.** Do not design around replacing it. All library reads/writes go through `calibredb` CLI.
 - **FanFicFare** handles AO3 epub downloads. Installed as a standalone pip package (`pip install fanficfare`) on the Windows side — not invoked through Calibre's plugin interface. Do not build a custom downloader.
-- **FanFicFare rate-limiting.** AO3/Cloudflare will trigger rate-limiting if downloads happen in rapid succession. The primary mitigation is `FANFICFARE_STORY_DELAY` (default: 30s) — a pause after **every individual story**. A secondary `FANFICFARE_BATCH_DELAY` (default: 10s) adds an extra cooldown at each batch boundary on top of the story delay. Both are user-configurable in `config.py`.
+- **FanFicFare rate-limiting.** AO3/Cloudflare will trigger rate-limiting if downloads happen in rapid succession. The primary mitigation is `FANFICFARE_STORY_DELAY` (default: 20s) — a pause after **every individual story**. A secondary `FANFICFARE_BATCH_DELAY` (default: 10s) adds an extra cooldown at each batch boundary on top of the story delay. Both are user-configurable in `config.py`.
 - **FanFicFare stalls** after a handful of downloads without any pause. The batch structure (default: 5 stories per batch) combined with the story delay addresses this.
-- **Cloudflare 525 errors.** AO3 sits behind Cloudflare which can return transient SSL errors (525, 524, 503, 502, 429). These are detected in FanFicFare's output and retried automatically up to `FANFICFARE_RETRY_COUNT` times (default: 3) with `FANFICFARE_RETRY_DELAY` seconds between attempts (default: 60s). Timeouts and non-CF errors are not retried.
-- **AO3 login blocks (403 on login endpoint)** — Cloudflare bot-detection blocks FanFicFare's login POST even with correct credentials. This is confirmed behaviour, not a bug. Detected via `performLogin` or `archiveofourown.org/users/login` in FanFicFare output → `DownloadResult.credentials_error = True`. These go to the Phase 2 browser opener queue and are **not retried**. Do not attempt to fix the Cloudflare block inline.
+- **Cloudflare 525 errors and all other failures are not retried.** Any failure (Cloudflare error, login block, deleted story, timeout) is returned immediately and goes to the Phase 2 browser opener queue for manual download. `_is_cloudflare_error()` is retained in `ao3.py` for failure categorisation in `browser.py`.
+- **AO3 login blocks (403 on login endpoint)** — Cloudflare bot-detection blocks FanFicFare's login POST even with correct credentials. This is confirmed behaviour, not a bug. Detected via `performLogin` or `archiveofourown.org/users/login` in FanFicFare output → `DownloadResult.credentials_error = True`. These go to the Phase 2 browser opener queue. Do not attempt to fix the Cloudflare block inline.
 - **Calibre GUI locking.** `calibredb` fails if Calibre GUI is open. Detect this at startup and warn the user before proceeding.
 - **GUI framework:** `tkinter` — lightweight, no install friction. Do not use frameworks requiring separate installation steps.
 
@@ -177,17 +177,42 @@ The Palma connects as an MTP portable device ("Palma 2 > Internal shared storage
 
 ---
 
-## Phase 2 (Do Not Build Yet)
+## Phase 2 — Browser Opener (Complete)
 
-After core sync is stable: add a **browser opener** that collects AO3 URLs for stories needing manual attention and opens them all as browser tabs in one click. Uses `webbrowser.open()` with short delays between tabs. No AO3 authentication required.
+Two browser-opener dialogs are triggered automatically during sync. Both use `webbrowser.open(new=2)` with `BROWSER_TAB_DELAY` (default 1s) between tabs.
 
-**FanFicFare failure queue:** Any story that fails to download during the core sync — regardless of failure type (Cloudflare retries exhausted, login blocked, timeout, deleted/private story, FanFicFare executable error) — should be queued for the browser opener as an AO3 URL for manual download. Implementation: call `failed_downloads(results)` on the `download_stories()` return value, then collect `build_ao3_url(r.story["ao3_work_id"])` for each. Do not retry failed downloads inline during sync — queue them for the browser opener pass.
+### Failed Downloads Dialog
+
+Shown after FanFicFare downloads complete, **before** the review queue, whenever one or more stories failed to download. Failures are colour-coded by category:
+
+| Category | Colour | Detection |
+|---|---|---|
+| Login blocked | Red | `performLogin` or `archiveofourown.org/users/login` in FanFicFare output |
+| Cloudflare error | Amber | 525/524/503/502/429 in output |
+| Download failed | Neutral | Everything else (deleted story, timeout, etc.) |
+
+User choices: **Open N Stories in Browser** (opens all AO3 URLs for manual download) or **Skip**. Either way proceeds to the review queue. Closing the window = Skip.
+
+Implementation: `sync/browser.py` → `categorize_failure()`, `open_failed_in_browser()`. Dialog class: `FailedDownloadsDialog` in `main.py`. Triggered from `_phase1_background()` and the standalone Download step (`_step_download_bg()`).
+
+### AO3 Curation Dialog
+
+Shown after the Palma read status sync completes (full sync and standalone Sync Read Status step), whenever any `#readstatus` values were updated. **Priority is excluded** — it requires no AO3 action. All others (Favorite, Read, DNF) appear grouped:
+
+- **Favorites — Add to bookmarks & mark read** (Favorite status; amber rows)
+- **Others — Mark read only** (Read, DNF, etc.)
+
+Empty groups are omitted. Both groups expanded by default. "Open N Stories in Browser" opens Favorites tabs first, then Others. Closing = Skip.
+
+`ReadStatusSyncResult` was extended with `updated_titles`, `updated_ao3_work_ids`, `updated_statuses` (all `dict[int, str]`, populated on every successful write) to provide the data needed for display and URL construction.
+
+Implementation: `sync/browser.py` → `curation_needed()`, `open_curation_in_browser()`. Dialog class: `AO3CurationDialog` in `main.py`. Triggered from `_phase2_background()` and `_step_sync_readstatus_bg()`.
 
 ---
 
 ## Current State
 
-All milestones 1–11 plus Palma read status sync are complete and tested in production. The app has run successfully end-to-end multiple times on real data. Test suite: **445 passing, 2 pre-existing WSL-only failures** in `test_boox_transfer.py` (the `creationflags=0` mismatch — correct on Windows, irrelevant in WSL).
+All milestones 1–11, Palma read status sync, and Phase 2 browser openers are complete and tested. The app has run successfully end-to-end multiple times on real data. Test suite: **471 passing, 2 pre-existing WSL-only failures** in `test_boox_transfer.py` (the `creationflags=0` mismatch — correct on Windows, irrelevant in WSL).
 
 | Module | Purpose |
 |---|---|
@@ -196,7 +221,8 @@ All milestones 1–11 plus Palma read status sync are complete and tested in pro
 | `sync/diff.py` | Parse Tampermonkey CSV, diff against Calibre ao3_work_ids |
 | `sync/ao3.py` | FanFicFare integration; batched download, pre-download detection, cancel support |
 | `sync/metadata.py` | Map story records to Calibre field format |
-| `sync/readstatus.py` | Palma read status sync; `parse_palma_csv()`, `sync_readstatus_from_palma()`, `_normalize_status()` |
+| `sync/readstatus.py` | Palma read status sync; `parse_palma_csv()`, `sync_readstatus_from_palma()`, `_normalize_status()`; result carries `updated_titles/ao3_work_ids/statuses` |
+| `sync/browser.py` | Phase 2 browser opener; failure categorization, `open_failed_in_browser()`, `curation_needed()`, `open_curation_in_browser()` |
 | `normalize/ship.py` | Ship normalization Rules 1–5 |
 | `normalize/rules.py` | Collection keyword matching |
 | `normalize/review.py` | Review queue logic |

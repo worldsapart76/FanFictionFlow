@@ -65,14 +65,8 @@ FANFICFARE_EXTRA_OPTIONS: list[str] = ["is_adult=true"]
 
 FANFICFARE_BATCH_SIZE: int = 5       # stories per batch
 FANFICFARE_BATCH_DELAY: int = 10     # seconds to pause between batches
-FANFICFARE_STORY_DELAY: int = 30     # seconds to pause between every individual story
+FANFICFARE_STORY_DELAY: int = 20     # seconds to pause between every individual story
 FANFICFARE_TIMEOUT: int = 120        # seconds before a single download is killed
-
-# Cloudflare transient error retry settings.
-# AO3 sits behind Cloudflare, which can return 525 (SSL handshake timeout)
-# and similar transient errors. These usually clear on a retry after a wait.
-FANFICFARE_RETRY_COUNT: int = 3      # max retries per story after a CF error
-FANFICFARE_RETRY_DELAY: int = 60     # seconds to wait before each retry
 
 # ---------------------------------------------------------------------------
 # Read status
@@ -96,6 +90,19 @@ SHIP_SHORTNAME_OVERRIDES: dict[str, str] = {
     "Jason Todd/Tim Drake": "Tim Drake/Jason Todd",
     "Regulus Black/James Potter": "Regulus/James",
 }
+
+# ---------------------------------------------------------------------------
+# Collection keyword table (user-editable)
+#
+# Ordered list of (keyword, collection_name) pairs. First match wins.
+# Keywords are matched case-insensitively against the AO3 fandoms field.
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Phase 2 — Browser opener
+# ---------------------------------------------------------------------------
+
+BROWSER_TAB_DELAY: float = 1.0  # seconds between opening successive browser tabs
 
 # ---------------------------------------------------------------------------
 # Collection keyword table (user-editable)

@@ -16,6 +16,7 @@ import json
 import re
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import psutil
@@ -114,7 +115,10 @@ def add_book(epub_path: Path, timeout: int | None = None) -> tuple[int, bool]:
         str(epub_path),
     ], timeout=timeout)
     # calibredb add prints: "Added book ids: 1234"
-    match = re.search(r"Added book ids:\s*(\d+)", result.stdout)
+    # When DeDRM or other plugins are active, calibredb may write this line to
+    # stderr instead of stdout — search both.
+    output = result.stdout + result.stderr
+    match = re.search(r"Added book ids:\s*(\d+)", output)
     if match:
         return int(match.group(1)), True  # genuinely new book
 
@@ -126,7 +130,7 @@ def add_book(epub_path: Path, timeout: int | None = None) -> tuple[int, bool]:
 
     raise RuntimeError(
         f"Could not parse Calibre ID from calibredb add output "
-        f"(book may already be in library):\n{result.stdout}"
+        f"(book may already be in library):\n{output}"
     )
 
 
@@ -193,6 +197,22 @@ def set_custom(calibre_id: int, field: str, value: str | int) -> None:
         field.lstrip("#"),   # calibredb set_custom takes name without #
         str(calibre_id),
         str(value),
+    ])
+
+
+def touch_last_modified(calibre_id: int) -> None:
+    """
+    Set the last_modified date for a book to the current UTC time.
+
+    Called after writing #readstatus so Calibre's Date column reflects
+    when the status was last changed via a Palma sync.
+    """
+    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    _run([
+        "set_metadata",
+        "--library-path", str(config.LIBRARY_PATH),
+        "-f", f"last_modified:{now}",
+        str(calibre_id),
     ])
 
 

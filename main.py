@@ -39,6 +39,7 @@ from orchestrator.normalize import ship as ship_module
 from orchestrator.normalize import rules as rules_module
 from orchestrator.normalize import review as review_module
 from orchestrator.sync import metadata, readstatus as readstatus_module
+from orchestrator.sync import browser as browser_module
 from orchestrator.export import library_csv, boox_transfer
 
 
@@ -492,9 +493,7 @@ class FanFictionFlowApp:
             self._log_line(summary)
 
             if failed_dl:
-                self._log_line(
-                    f"  Failed downloads (queued for Phase 2 browser opener):"
-                )
+                self._log_line("  Failed downloads:")
                 for r in failed_dl:
                     title = r.story.get("title") or r.story["ao3_work_id"]
                     self._log_line(f"    - {title!r}: {r.error}")
@@ -565,14 +564,20 @@ class FanFictionFlowApp:
 
             epub_paths = [r.epub_path for r in successful_dl]
 
-            # Hand off to main thread to show the review queue dialog
-            self.root.after(
-                0,
-                lambda: self._show_review_queue(
+            # Hand off to main thread.  If there were failed downloads, show
+            # the browser opener dialog first, then proceed to the review queue.
+            def _show_rq() -> None:
+                self._show_review_queue(
                     queue, imports, epub_paths, existing_ships, existing_collections,
                     fresh_calibre_ids,
-                ),
-            )
+                )
+
+            if failed_dl:
+                self.root.after(
+                    0, lambda: self._show_failed_downloads(failed_dl, on_done=_show_rq)
+                )
+            else:
+                self.root.after(0, _show_rq)
 
         except Exception as exc:
             self._log_line(f"Error during sync: {exc}")
@@ -732,16 +737,25 @@ class FanFictionFlowApp:
             self._log_line(summary)
 
             if failed_dl:
-                self._log_line("  Failed downloads (queued for Phase 2 browser opener):")
+                self._log_line("  Failed downloads:")
                 for r in failed_dl:
                     title = r.story.get("title") or r.story["ao3_work_id"]
                     self._log_line(f"    - {title!r}: {r.error}")
 
-            if self._cancel_event.is_set():
-                self._set_status("Cancelled", "orange")
+            # Capture cancel state now — before any dialog interaction changes it.
+            cancelled = self._cancel_event.is_set()
+
+            def _after_dialog() -> None:
+                self._set_status("Cancelled" if cancelled else "Download complete",
+                                 "orange" if cancelled else "green")
+                self._finish_sync(success=not cancelled)
+
+            if failed_dl:
+                self.root.after(
+                    0, lambda: self._show_failed_downloads(failed_dl, on_done=_after_dialog)
+                )
             else:
-                self._set_status("Download complete", "green")
-            self._finish_sync(success=not self._cancel_event.is_set())
+                self.root.after(0, _after_dialog)
 
         except Exception as exc:
             self._log_line(f"Error during download: {exc}")
@@ -964,7 +978,16 @@ class FanFictionFlowApp:
             for cid, err in rs_result.failed:
                 self._log_line(f"  Failed id={cid}: {err}")
             self._set_status("Read status sync complete", "green")
-            self._finish_sync(success=True)
+            curation = browser_module.curation_needed(rs_result)
+            if curation:
+                self.root.after(
+                    0,
+                    lambda: self._show_curation_dialog(
+                        rs_result, on_done=lambda: self._finish_sync(success=True)
+                    ),
+                )
+            else:
+                self._finish_sync(success=True)
         except Exception as exc:
             self._log_line(f"Read status sync error: {exc}")
             self._log_line(traceback.format_exc())
@@ -994,6 +1017,58 @@ class FanFictionFlowApp:
         self._settings["palma_readstatus_path"] = str(p)
         _save_settings(self._settings)
         return p
+
+    # -----------------------------------------------------------------------
+    # Browser opener helpers (main thread)
+    # -----------------------------------------------------------------------
+
+    def _show_failed_downloads(self, failed_dl: list, on_done: Callable) -> None:
+        """Show the FailedDownloadsDialog on the main thread, then call on_done."""
+        try:
+            def _on_open() -> None:
+                self._log_line(
+                    f"Opening {len(failed_dl)} "
+                    f"{'story' if len(failed_dl) == 1 else 'stories'} in browser…"
+                )
+                browser_module.open_failed_in_browser(failed_dl)
+                on_done()
+
+            def _on_skip() -> None:
+                self._log_line("Skipped browser opener for failed downloads.")
+                on_done()
+
+            FailedDownloadsDialog(
+                self.root, failed=failed_dl, on_open=_on_open, on_skip=_on_skip,
+            )
+        except Exception as exc:
+            self._log_line(f"[ERROR] Failed downloads dialog error: {exc}")
+            self._log_line(traceback.format_exc())
+            on_done()
+
+    def _show_curation_dialog(self, rs_result, on_done: Callable) -> None:
+        """Show the AO3CurationDialog on the main thread, then call on_done."""
+        try:
+            n = len(browser_module.curation_needed(rs_result))
+
+            def _on_open() -> None:
+                self._log_line(
+                    f"Opening {n} {'story' if n == 1 else 'stories'} "
+                    "in browser for AO3 curation…"
+                )
+                browser_module.open_curation_in_browser(rs_result)
+                on_done()
+
+            def _on_skip() -> None:
+                self._log_line("Skipped AO3 curation browser opener.")
+                on_done()
+
+            AO3CurationDialog(
+                self.root, rs_result=rs_result, on_open=_on_open, on_skip=_on_skip,
+            )
+        except Exception as exc:
+            self._log_line(f"[ERROR] AO3 curation dialog error: {exc}")
+            self._log_line(traceback.format_exc())
+            on_done()
 
     # -----------------------------------------------------------------------
     # Review queue (main thread)
@@ -1082,6 +1157,7 @@ class FanFictionFlowApp:
                 self._log_line(f"  Metadata failed for {title!r}: {r.error}")
 
             # Step 7 — Apply Palma read status overrides (if file is configured)
+            rs_result = None
             palma_csv_path = self._settings.get("palma_readstatus_path")
             if palma_csv_path and Path(palma_csv_path).exists():
                 self._log_line("Applying Palma read status overrides…")
@@ -1148,7 +1224,16 @@ class FanFictionFlowApp:
             self._log_line("")
             self._log_line("Sync complete.")
             self._set_status("Sync complete", "green")
-            self._finish_sync(success=True)
+            curation = browser_module.curation_needed(rs_result) if rs_result else []
+            if curation:
+                self.root.after(
+                    0,
+                    lambda: self._show_curation_dialog(
+                        rs_result, on_done=lambda: self._finish_sync(success=True)
+                    ),
+                )
+            else:
+                self._finish_sync(success=True)
 
         except Exception as exc:
             self._log_line(f"Error writing metadata: {exc}")
@@ -1338,6 +1423,258 @@ class SettingsDialog(tk.Toplevel):
 
         self._on_save(self._settings)
         self.destroy()
+
+
+# ---------------------------------------------------------------------------
+# Failed downloads dialog
+# ---------------------------------------------------------------------------
+
+
+class FailedDownloadsDialog(tk.Toplevel):
+    """
+    Modal dialog listing stories that failed to download.
+
+    Shown after FanFicFare downloads complete (before the review queue) when
+    one or more stories could not be fetched.  The user can open all failed
+    URLs in the browser for manual download, or skip.
+
+    Closing the window via the X button is treated as Skip (does not cancel sync).
+    """
+
+    def __init__(
+        self,
+        parent: tk.Tk,
+        failed: list,
+        on_open: Callable[[], None],
+        on_skip: Callable[[], None],
+    ) -> None:
+        super().__init__(parent)
+        self.title("Failed Downloads")
+        self.grab_set()
+        self.transient(parent)
+
+        self._failed = failed
+        self._on_open = on_open
+        self._on_skip = on_skip
+
+        self._build_ui()
+
+        self.geometry("740x360")
+        self.protocol("WM_DELETE_WINDOW", self._skip)
+        self.wait_visibility()
+        self.focus_set()
+
+    def _build_ui(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        main = ttk.Frame(self, padding=12)
+        main.grid(row=0, column=0, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(1, weight=1)
+
+        n = len(self._failed)
+        ttk.Label(
+            main,
+            text=(
+                f"{n} {'story' if n == 1 else 'stories'} could not be downloaded. "
+                "Open in your browser to download manually."
+            ),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        tree_frame = ttk.Frame(main)
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        cols = ("title", "reason")
+        self._tree = ttk.Treeview(
+            tree_frame, columns=cols, show="headings", selectmode="none", height=10,
+        )
+        self._tree.heading("title", text="Title")
+        self._tree.heading("reason", text="Failure Reason")
+        self._tree.column("title", width=440, minwidth=120, stretch=True)
+        self._tree.column("reason", width=160, minwidth=80, stretch=False)
+
+        self._tree.tag_configure(browser_module.CATEGORY_LOGIN, background="#f8d7da")
+        self._tree.tag_configure(browser_module.CATEGORY_CLOUDFLARE, background="#fff3cd")
+        self._tree.tag_configure(browser_module.CATEGORY_FAILED, background="#f5f5f5")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        for result in self._failed:
+            title = (result.story.get("title") or result.story["ao3_work_id"])[:80]
+            reason = browser_module.categorize_failure(result)
+            self._tree.insert("", "end", values=(title, reason), tags=(reason,))
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.grid(row=2, column=0, sticky="e", pady=(10, 0))
+
+        ttk.Button(btn_frame, text="Skip", command=self._skip).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(
+            btn_frame,
+            text=f"Open {n} {'Story' if n == 1 else 'Stories'} in Browser",
+            command=self._open_in_browser,
+        ).grid(row=0, column=1)
+
+    def _open_in_browser(self) -> None:
+        self.destroy()
+        self._on_open()
+
+    def _skip(self) -> None:
+        self.destroy()
+        self._on_skip()
+
+
+# ---------------------------------------------------------------------------
+# AO3 curation dialog
+# ---------------------------------------------------------------------------
+
+
+class AO3CurationDialog(tk.Toplevel):
+    """
+    Modal dialog listing stories whose Calibre #readstatus was just updated
+    from the Palma and need AO3 curation.
+
+    Stories are grouped into two sections:
+      - Favorites — Add to bookmarks & mark read
+      - Others    — Mark read only
+
+    The user can open all URLs in the browser, or skip.
+    Closing via X is treated as Skip.
+    """
+
+    def __init__(
+        self,
+        parent: tk.Tk,
+        rs_result,
+        on_open: Callable[[], None],
+        on_skip: Callable[[], None],
+    ) -> None:
+        super().__init__(parent)
+        self.title("AO3 Curation Needed")
+        self.grab_set()
+        self.transient(parent)
+
+        self._rs_result = rs_result
+        self._on_open = on_open
+        self._on_skip = on_skip
+
+        # Separate into groups.
+        cids = browser_module.curation_needed(rs_result)
+        self._favorites = [
+            c for c in cids
+            if rs_result.updated_statuses.get(c, "").lower() == "favorite"
+        ]
+        self._others = [c for c in cids if c not in set(self._favorites)]
+
+        self._build_ui()
+
+        self.geometry("740x400")
+        self.protocol("WM_DELETE_WINDOW", self._skip)
+        self.wait_visibility()
+        self.focus_set()
+
+    def _build_ui(self) -> None:
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        main = ttk.Frame(self, padding=12)
+        main.grid(row=0, column=0, sticky="nsew")
+        main.columnconfigure(0, weight=1)
+        main.rowconfigure(1, weight=1)
+
+        n = len(self._favorites) + len(self._others)
+        ttk.Label(
+            main,
+            text=(
+                f"{n} {'story' if n == 1 else 'stories'} need AO3 curation "
+                "after Palma read status sync."
+            ),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+
+        tree_frame = ttk.Frame(main)
+        tree_frame.grid(row=1, column=0, sticky="nsew")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        cols = ("title", "status")
+        self._tree = ttk.Treeview(
+            tree_frame,
+            columns=cols,
+            show="tree headings",
+            selectmode="none",
+            height=12,
+        )
+        self._tree.heading("#0", text="")
+        self._tree.heading("title", text="Title")
+        self._tree.heading("status", text="New Status")
+        self._tree.column("#0", width=20, minwidth=20, stretch=False)
+        self._tree.column("title", width=440, minwidth=120, stretch=True)
+        self._tree.column("status", width=160, minwidth=80, stretch=False)
+
+        self._tree.tag_configure("group_header", background="#e9ecef", font=("TkDefaultFont", 9, "bold"))
+        self._tree.tag_configure("favorite_row", background="#fff3cd")
+
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=vsb.set)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        vsb.grid(row=0, column=1, sticky="ns")
+
+        self._populate_groups()
+
+        btn_frame = ttk.Frame(main)
+        btn_frame.grid(row=2, column=0, sticky="e", pady=(10, 0))
+
+        ttk.Button(btn_frame, text="Skip", command=self._skip).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(
+            btn_frame,
+            text=f"Open {n} {'Story' if n == 1 else 'Stories'} in Browser",
+            command=self._open_in_browser,
+        ).grid(row=0, column=1)
+
+    def _populate_groups(self) -> None:
+        rs = self._rs_result
+        if self._favorites:
+            grp = self._tree.insert(
+                "", "end",
+                text="Favorites — Add to bookmarks & mark read",
+                values=("", ""),
+                tags=("group_header",),
+                open=True,
+            )
+            for cid in self._favorites:
+                title = (rs.updated_titles.get(cid) or str(cid))[:80]
+                status = rs.updated_statuses.get(cid, "")
+                self._tree.insert(grp, "end", values=(title, status), tags=("favorite_row",))
+
+        if self._others:
+            grp = self._tree.insert(
+                "", "end",
+                text="Others — Mark read only",
+                values=("", ""),
+                tags=("group_header",),
+                open=True,
+            )
+            for cid in self._others:
+                title = (rs.updated_titles.get(cid) or str(cid))[:80]
+                status = rs.updated_statuses.get(cid, "")
+                self._tree.insert(grp, "end", values=(title, status))
+
+    def _open_in_browser(self) -> None:
+        self.destroy()
+        self._on_open()
+
+    def _skip(self) -> None:
+        self.destroy()
+        self._on_skip()
 
 
 # ---------------------------------------------------------------------------

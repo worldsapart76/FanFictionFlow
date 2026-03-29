@@ -115,10 +115,10 @@ class TestParsePalmaCsv:
 # ---------------------------------------------------------------------------
 
 _LIBRARY = [
-    {"id": 1, "#readstatus": "unread"},
-    {"id": 2, "#readstatus": "read"},
-    {"id": 3, "#readstatus": "Favorite"},
-    {"id": 4, "#readstatus": "unread"},
+    {"id": 1, "#readstatus": "unread", "title": "Story One", "#ao3_work_id": "111"},
+    {"id": 2, "#readstatus": "read",   "title": "Story Two", "#ao3_work_id": "222"},
+    {"id": 3, "#readstatus": "Favorite", "title": "Story Three", "#ao3_work_id": "333"},
+    {"id": 4, "#readstatus": "unread", "title": "Story Four", "#ao3_work_id": "444"},
 ]
 
 
@@ -127,7 +127,8 @@ class TestSyncReadstatusFromPalma:
         csv = _write_csv(tmp_path, csv_content)
         lib = library if library is not None else _LIBRARY
         with patch("orchestrator.sync.readstatus.calibre.fetch_library", return_value=lib), \
-             patch("orchestrator.sync.readstatus.calibre.set_custom") as mock_set:
+             patch("orchestrator.sync.readstatus.calibre.set_custom") as mock_set, \
+             patch("orchestrator.sync.readstatus.calibre.touch_last_modified"):
             result = sync_readstatus_from_palma(csv)
         return result, mock_set
 
@@ -187,7 +188,8 @@ class TestSyncReadstatusFromPalma:
              patch(
                  "orchestrator.sync.readstatus.calibre.set_custom",
                  side_effect=RuntimeError("calibredb error"),
-             ):
+             ), \
+             patch("orchestrator.sync.readstatus.calibre.touch_last_modified"):
             result = sync_readstatus_from_palma(csv)
         assert result.updated == []
         assert len(result.failed) == 1
@@ -221,3 +223,18 @@ class TestSyncReadstatusFromPalma:
         )
         assert 5 in result.updated
         mock_set.assert_called_once_with(5, "#readstatus", "Read")
+
+    def test_updated_metadata_fields_populated(self, tmp_path):
+        # id=1 transitions unread→read; verify the 3 new dict fields.
+        result, _ = self._run(tmp_path, "id,readstatus\n1,read\n")
+        assert result.updated_titles[1] == "Story One"
+        assert result.updated_ao3_work_ids[1] == "111"
+        assert result.updated_statuses[1] == "Read"
+
+    def test_updated_metadata_fields_absent_for_skipped(self, tmp_path):
+        # id=2 already has status "read" → skipped; new dict fields stay empty.
+        result, _ = self._run(tmp_path, "id,readstatus\n2,read\n")
+        assert 2 in result.skipped
+        assert 2 not in result.updated_titles
+        assert 2 not in result.updated_ao3_work_ids
+        assert 2 not in result.updated_statuses

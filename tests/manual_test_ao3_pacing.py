@@ -141,8 +141,6 @@ print(f"  FANFICFARE_STORY_DELAY  = {config.FANFICFARE_STORY_DELAY}s   (gap afte
 print(f"  FANFICFARE_BATCH_SIZE   = {config.FANFICFARE_BATCH_SIZE}      (stories per batch)")
 print(f"  FANFICFARE_BATCH_DELAY  = {config.FANFICFARE_BATCH_DELAY}s   (extra gap after each batch)")
 print(f"  FANFICFARE_TIMEOUT      = {config.FANFICFARE_TIMEOUT}s  (per-story hard timeout)")
-print(f"  FANFICFARE_RETRY_COUNT  = {config.FANFICFARE_RETRY_COUNT}      (CF error retries per story)")
-print(f"  FANFICFARE_RETRY_DELAY  = {config.FANFICFARE_RETRY_DELAY}s   (wait before each CF retry)")
 print()
 
 n = len(stories)
@@ -223,16 +221,11 @@ def _on_result(result):
         label = "FAIL (timeout)"
         detail = ""
     elif result.error and _is_cloudflare_error(result.error):
-        retries = cf_retries.get(wid, 0)
-        label = f"FAIL (CF, {retries} retr{'y' if retries == 1 else 'ies'})"
-        detail = ""
-    elif result.error and "attempt" in result.error:
-        # CF error that exhausted retries
-        label = "FAIL (CF exhausted)"
+        label = "FAIL (CF)"
         detail = ""
     elif result.error and _is_credentials_error(result.error):
         label = "FAIL (login blocked)"
-        detail = "AO3 login blocked after all retries — story requires login; may be a transient Cloudflare block"
+        detail = "AO3 login blocked — story requires login; may be a transient Cloudflare block"
     else:
         label = "FAIL (other)"
         detail = result.error or ""
@@ -278,8 +271,7 @@ print()
 
 passed       = [r for r in all_results if r.success]
 cf_failed    = [r for r in all_results
-                if not r.success and r.error
-                and (_is_cloudflare_error(r.error) or "attempt" in r.error)]
+                if not r.success and r.error and _is_cloudflare_error(r.error)]
 cred_failed  = [r for r in all_results if r.credentials_error]
 timed_out    = [r for r in all_results
                 if not r.success and r.error and "timed out" in r.error.lower()]
@@ -314,12 +306,11 @@ print()
 
 # Verdict
 if len(cred_failed) > 0:
-    print(f"  VERDICT: {len(cred_failed)} LOGIN BLOCKED (after all retries).")
-    print(f"  These stories require AO3 login; Cloudflare blocked the automated")
-    print(f"  login attempt even after {config.FANFICFARE_RETRY_COUNT} retries.")
+    print(f"  VERDICT: {len(cred_failed)} LOGIN BLOCKED.")
+    print(f"  These stories require AO3 login; Cloudflare blocked the automated login attempt.")
     print(f"  If you recently changed your password, check:")
     print(f"    {config.AO3_PERSONAL_INI_PATH}")
-    print(f"  Otherwise this is a transient CF block — try again later.")
+    print(f"  Otherwise this is a transient CF block — use the browser opener to download manually.")
     print()
 if len(cf_failed) == 0 and len(timed_out) == 0:
     if len(cred_failed) == 0:

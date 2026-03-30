@@ -137,13 +137,24 @@ def find_existing_epub(work_id: str, output_dir: Path, title: str = "") -> Path 
             pass
 
     # 3. Title-based fuzzy match for manually downloaded files.
+    # Accepts exact match OR prefix match in either direction (handles filenames
+    # that are truncated versions of the full title, e.g. "would_you_like_to_be"
+    # matching "would you like to be, stuck in ikea with me").
     if title:
         normalized_title = _normalize_title_for_match(title)
         if normalized_title:
             for epub in sorted(output_dir.glob("*.epub"), key=lambda p: p.stat().st_mtime, reverse=True):
                 if epub.name == _CACHE_FILENAME:
                     continue
-                if _normalize_title_for_match(epub.stem) == normalized_title:
+                epub_norm = _normalize_title_for_match(epub.stem)
+                if epub_norm == normalized_title:
+                    _cache_epub(work_id, epub, output_dir)
+                    return epub
+                # Prefix match: filename is a truncated title or vice-versa.
+                # Require at least 10 characters to avoid false positives.
+                shorter = epub_norm if len(epub_norm) < len(normalized_title) else normalized_title
+                longer  = normalized_title if len(epub_norm) < len(normalized_title) else epub_norm
+                if len(shorter) >= 10 and longer.startswith(shorter):
                     _cache_epub(work_id, epub, output_dir)
                     return epub
 

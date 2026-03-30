@@ -226,7 +226,7 @@ All milestones 1–11, Palma read status sync, and Phase 2 browser openers are c
 | `normalize/ship.py` | Ship normalization Rules 1–5 |
 | `normalize/rules.py` | Collection keyword matching |
 | `normalize/review.py` | Review queue logic |
-| `export/library_csv.py` | Timestamped CSV export; `find_latest_csv()` for standalone transfer step |
+| `export/library_csv.py` | Timestamped CSV export; `find_latest_csv()` for standalone transfer step; exports `tags` and `comments` columns (required by CalibreFanFicBrowser — do not remove) |
 | `export/boox_transfer.py` | ADB push to Palma; rename_map support |
 | `credentials.py` | Read/write AO3 credentials to FanFicFare's `personal.ini` |
 | `main.py` | tkinter GUI; two-phase sync; Steps tab for individual re-runs; state persistence |
@@ -308,6 +308,7 @@ Scripts must be in PATH — pip-installed executables (fanficfare, etc.) live in
 - Do not build a custom AO3 epub downloader (use FanFicFare)
 - Do not write metadata to Calibre before the review queue is confirmed
 - Do not change the Calibre library CSV column names, field formats, or epub naming convention without checking compatibility with https://github.com/worldsapart76/CalibreFanFicBrowser
+- Do not remove `tags` or `comments` from `EXPORT_COLUMNS` in `library_csv.py` — the CalibreFanFicBrowser Android app depends on both columns being present
 - Do not add GUI frameworks beyond tkinter
 - Do not support platforms other than Windows
 - Do not remove `creationflags=subprocess.CREATE_NO_WINDOW` from any subprocess call

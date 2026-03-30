@@ -1741,7 +1741,8 @@ class ReviewQueueDialog(tk.Toplevel):
         self._populate()
         self._refresh_confirm_btn()
 
-        self.geometry("940x580")
+        self.geometry("1200x700")
+        self.minsize(900, 520)
         self.wait_visibility()
         self.focus_set()
 
@@ -1762,7 +1763,8 @@ class ReviewQueueDialog(tk.Toplevel):
             main,
             text=(
                 "Review proposed metadata before writing to Calibre. "
-                "Amber rows require your input."
+                "Amber rows require your input. "
+                "When all rows are green, click Confirm & Write to proceed."
             ),
         ).grid(row=0, column=0, sticky="w", pady=(0, 6))
 
@@ -1784,18 +1786,18 @@ class ReviewQueueDialog(tk.Toplevel):
         self._tree.heading("#0", text="")
         self._tree.column("#0", width=16, minwidth=16, stretch=False)
 
-        headings: dict[str, tuple[str, int, bool]] = {
-            # col: (heading text, width, stretch)
-            "title":      ("Title",         200, True),
-            "fandom":     ("Fandom",        120, False),
-            "collection": ("Collection",    100, False),
-            "raw_ship":   ("Raw Ship",      150, False),
-            "ship":       ("Proposed Ship", 130, False),
-            "status":     ("Status",         68, False),
+        headings: dict[str, tuple[str, int, int]] = {
+            # col: (heading text, width, minwidth)
+            "title":      ("Title",         280, 100),
+            "fandom":     ("Fandom",        160,  60),
+            "collection": ("Collection",    120,  60),
+            "raw_ship":   ("Raw Ship",      200,  80),
+            "ship":       ("Proposed Ship", 180,  80),
+            "status":     ("Status",         68,  50),
         }
-        for col, (text, width, stretch) in headings.items():
+        for col, (text, width, minwidth) in headings.items():
             self._tree.heading(col, text=text)
-            self._tree.column(col, width=width, minwidth=48, stretch=stretch)
+            self._tree.column(col, width=width, minwidth=minwidth, stretch=True)
 
         # Colour tags
         self._tree.tag_configure("review", background="#fff3cd")   # amber
@@ -1803,9 +1805,12 @@ class ReviewQueueDialog(tk.Toplevel):
         self._tree.tag_configure("group", font=("TkDefaultFont", 9, "bold"))
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self._tree.yview)
-        self._tree.configure(yscrollcommand=vsb.set)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=self._tree.xview)
+        self._tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        tree_frame.rowconfigure(1, weight=0)
         self._tree.grid(row=0, column=0, sticky="nsew")
         vsb.grid(row=0, column=1, sticky="ns")
+        hsb.grid(row=1, column=0, sticky="ew")
 
         self._tree.bind("<<TreeviewSelect>>", self._on_select)
 
@@ -1872,7 +1877,7 @@ class ReviewQueueDialog(tk.Toplevel):
             "", "end",
             iid=self._AUTO_IID,
             values=(f"Auto-resolved ({n_auto})", "", "", "", "", ""),
-            open=False,
+            open=True,
             tags=("group",),
         )
 

@@ -210,6 +210,12 @@ Implementation: `sync/browser.py` → `curation_needed()`, `open_curation_in_bro
 
 ---
 
+## Backlog
+
+Deferred work items with full context are tracked in `BACKLOG.md` at the project root. Check it before proposing changes that might already be analysed there.
+
+---
+
 ## Current State
 
 All milestones 1–11, Palma read status sync, and Phase 2 browser openers are complete and tested. The app has run successfully end-to-end multiple times on real data. Test suite: **471 passing, 2 pre-existing WSL-only failures** in `test_boox_transfer.py` (the `creationflags=0` mismatch — correct on Windows, irrelevant in WSL).

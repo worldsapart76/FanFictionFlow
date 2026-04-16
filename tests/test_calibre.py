@@ -247,7 +247,7 @@ class TestExportCsv:
             mock_run.return_value = _make_completed_process()
             calibre.export_csv(Path("output/library_csv.csv"))
         args = mock_run.call_args[0][0]
-        assert "output/library_csv.csv" in args
+        assert str(Path("output/library_csv.csv")) in args
 
     def test_passes_library_path(self):
         with patch("orchestrator.sync.calibre._run") as mock_run:

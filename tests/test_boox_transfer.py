@@ -2,12 +2,17 @@
 Unit tests for export/boox_transfer.py — Milestone 9 (ADB transfer).
 
 All ADB subprocess calls are mocked — no real device required.
-Run in WSL with:
-    python3.12 -m pytest tests/test_boox_transfer.py
+Run with:
+    python -m pytest tests/test_boox_transfer.py
 """
 
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, call, patch
+
+# Mirror the platform guard used in production code.
+_CREATION_FLAGS = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
 
 import pytest
 
@@ -120,6 +125,7 @@ class TestCheckConnected:
             capture_output=True,
             text=True,
             timeout=10,
+            creationflags=_CREATION_FLAGS,
         )
 
 
@@ -139,6 +145,7 @@ class TestPushFile:
             capture_output=True,
             text=True,
             timeout=60,
+            creationflags=_CREATION_FLAGS,
         )
 
     def test_raises_oserror_on_nonzero_exit(self, tmp_path):

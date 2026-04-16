@@ -222,7 +222,7 @@ An active migration plan for moving all projects from WSL/Dropbox to `C:\Dev\` i
 
 ## Current State
 
-All milestones 1–11, Palma read status sync, and Phase 2 browser openers are complete and tested. The app has run successfully end-to-end multiple times on real data. Test suite: **471 passing, 2 pre-existing WSL-only failures** in `test_boox_transfer.py` (the `creationflags=0` mismatch — correct on Windows, irrelevant in WSL).
+All milestones 1–11, Palma read status sync, and Phase 2 browser openers are complete and tested. The app has run successfully end-to-end multiple times on real data. Test suite: **467 passing, 0 failures** on Windows.
 
 | Module | Purpose |
 |---|---|
@@ -257,7 +257,7 @@ All milestones 1–11, Palma read status sync, and Phase 2 browser openers are c
 
 | Test type | Where to run | Command |
 |---|---|---|
-| Unit tests (mocked) | WSL terminal | `python3.12 -m pytest tests/` |
+| Unit tests (mocked) | Windows PowerShell | `python -m pytest tests/` |
 | Calibre CLI integration | Windows PowerShell | `python -B tests\manual_test_calibre.py` |
 | Diff / CSV integration | Windows PowerShell | `python -B tests\manual_test_diff.py` |
 | FanFicFare full run | Windows PowerShell | `python -B tests\manual_test_ao3.py` |
@@ -271,18 +271,18 @@ Unit tests use mocks and never touch real Calibre or AO3 — they run fine in WS
 
 ---
 
-### WSL unit test command
+### Unit test command
 
-```bash
-python3.12 -m pytest tests/
+```powershell
+python -m pytest tests/
 ```
 
 ### Windows PowerShell setup (run once per session)
 
 ```powershell
-cd "\\wsl$\Ubuntu-24.04\home\worldsapart76\FanFictionFlow"
+cd C:\Dev\FanFictionFlow
 $env:PATH = "C:\Users\world\AppData\Local\Programs\Python\Python312\Scripts;C:\Users\world\AppData\Local\Programs\Python\Python312;" + $env:PATH
-$env:PYTHONPATH = "\\wsl$\Ubuntu-24.04\home\worldsapart76\FanFictionFlow"
+$env:PYTHONPATH = "C:\Dev\FanFictionFlow"
 ```
 
 Scripts must be in PATH — pip-installed executables (fanficfare, etc.) live in `Scripts\`, not the Python root.
@@ -300,7 +300,6 @@ Scripts must be in PATH — pip-installed executables (fanficfare, etc.) live in
 
 - **`python3` does not exist on Windows** — always use `python` in PowerShell instructions.
 - **`python -B` for manual tests** — Python caches `.pyc` bytecode aggressively; use `-B` to avoid running stale versions.
-- **WSL cannot see Windows processes** — `is_gui_open()` always returns `False` in WSL. Test from PowerShell.
 - **Calibre GUI must be closed** before any integration test that calls calibredb. `is_gui_open()` will warn.
 - **calibredb custom column naming** — `calibredb list` uses `*fieldname` prefix for custom columns; `calibre.py` normalizes `*` → `#` internally. All other code uses `#`.
 - **`calibredb add` is slow** — ~60–90 seconds on a 6,700-book library. This is normal; add an appropriate timeout.

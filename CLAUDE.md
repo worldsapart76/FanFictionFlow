@@ -214,6 +214,10 @@ Implementation: `sync/browser.py` → `curation_needed()`, `open_curation_in_bro
 
 Deferred work items with full context are tracked in `BACKLOG.md` at the project root. Check it before proposing changes that might already be analysed there.
 
+Planned enhancements covering AO3 API integration, Calibre server, Palma transfer, and CalibreFanFicBrowser redesign are documented in `ENHANCEMENTS.md`.
+
+An active migration plan for moving all projects from WSL/Dropbox to `C:\Dev\` is in `MIGRATION.md`.
+
 ---
 
 ## Current State

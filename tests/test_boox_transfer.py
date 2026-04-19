@@ -22,9 +22,20 @@ from orchestrator.export.boox_transfer import (
     TransferResult,
     _adb_base,
     _check_connected,
+    _list_device_files,
     _push_file,
     transfer_to_boox,
 )
+
+
+@pytest.fixture(autouse=True)
+def _empty_device_listing():
+    """Default every test to an empty Palma — existing files never collide."""
+    with patch(
+        "orchestrator.export.boox_transfer._list_device_files",
+        return_value=set(),
+    ):
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -267,7 +278,7 @@ class TestEpubPushing:
         csv = _make_csv(tmp_path)
         result, push_calls = self._run_with_push_spy([], csv_path=csv)
         assert len(push_calls) == 1
-        assert push_calls[0][1] == "/sdcard/Books/library_csv.csv"
+        assert push_calls[0][1] == "/sdcard/Books/_data/library_csv.csv"
 
     def test_csv_not_pushed_when_none(self):
         _, push_calls = self._run_with_push_spy([], csv_path=None)
@@ -379,7 +390,7 @@ class TestRenameMap:
         # paths in the map; this test verifies the CSV remote path is correct
         # when the map is empty (the normal case).
         _, calls_no_map = self._run_with_push_spy([], csv_path=csv, rename_map={})
-        assert calls_no_map[0][1] == "/sdcard/Books/library_csv.csv"
+        assert calls_no_map[0][1] == "/sdcard/Books/_data/library_csv.csv"
 
     def test_renamed_remote_paths_appear_in_copied(self, tmp_path):
         epubs = _make_epubs(tmp_path, 2)
@@ -390,3 +401,143 @@ class TestRenameMap:
         result, _ = self._run_with_push_spy(epubs, rename_map=rename_map)
         assert "/sdcard/Books/100-first story.epub" in result.copied
         assert "/sdcard/Books/200-second story.epub" in result.copied
+
+
+# ---------------------------------------------------------------------------
+# transfer_to_boox — skip-if-already-on-device
+# ---------------------------------------------------------------------------
+
+
+class TestSkipAlreadyOnDevice:
+    def _run(self, epub_paths, device_listing, csv_path=None, csv_listing=None,
+             rename_map=None):
+        calls = []
+        def fake_push(adb, src, remote):
+            calls.append((src, remote))
+        def fake_list(adb, base):
+            if base == "/sdcard/Books":
+                return set(device_listing)
+            if base == "/sdcard/Books/_data":
+                return set(csv_listing or [])
+            return set()
+        with patch("orchestrator.export.boox_transfer._check_connected"), \
+             patch.object(config, "BOOX_DEVICE_PATH", "/sdcard/Books"), \
+             patch.object(config, "BOOX_DEVICE_CSV_PATH", "/sdcard/Books/_data"), \
+             patch("orchestrator.export.boox_transfer._list_device_files",
+                   side_effect=fake_list), \
+             patch("orchestrator.export.boox_transfer._push_file",
+                   side_effect=fake_push):
+            result = transfer_to_boox(
+                epub_paths, csv_path=csv_path, rename_map=rename_map
+            )
+        return result, calls
+
+    def test_existing_epub_is_skipped_not_pushed(self, tmp_path):
+        epubs = _make_epubs(tmp_path, 2)
+        result, calls = self._run(
+            epubs, device_listing={epubs[0].name}
+        )
+        assert len(calls) == 1
+        assert calls[0][0] == epubs[1]
+        assert result.copied == [f"/sdcard/Books/{epubs[1].name}"]
+        assert result.skipped == [f"/sdcard/Books/{epubs[0].name}"]
+
+    def test_all_existing_nothing_pushed(self, tmp_path):
+        epubs = _make_epubs(tmp_path, 3)
+        result, calls = self._run(
+            epubs, device_listing={e.name for e in epubs}
+        )
+        assert calls == []
+        assert result.copied == []
+        assert len(result.skipped) == 3
+
+    def test_skip_uses_renamed_target_not_source_name(self, tmp_path):
+        epubs = _make_epubs(tmp_path, 1)
+        rename_map = {epubs[0]: "100-renamed.epub"}
+        result, calls = self._run(
+            epubs, device_listing={"100-renamed.epub"}, rename_map=rename_map
+        )
+        assert calls == []
+        assert result.skipped == ["/sdcard/Books/100-renamed.epub"]
+
+    def test_rename_means_source_name_on_device_still_pushes(self, tmp_path):
+        epubs = _make_epubs(tmp_path, 1)
+        rename_map = {epubs[0]: "100-renamed.epub"}
+        result, calls = self._run(
+            epubs, device_listing={epubs[0].name}, rename_map=rename_map
+        )
+        assert len(calls) == 1
+        assert calls[0][1] == "/sdcard/Books/100-renamed.epub"
+        assert result.skipped == []
+
+    def test_csv_skipped_when_already_present(self, tmp_path):
+        csv = _make_csv(tmp_path)
+        result, calls = self._run(
+            [], device_listing=set(),
+            csv_path=csv, csv_listing={csv.name},
+        )
+        assert calls == []
+        assert result.skipped == [f"/sdcard/Books/_data/{csv.name}"]
+
+    def test_csv_checked_in_csv_dir_not_epub_dir(self, tmp_path):
+        csv = _make_csv(tmp_path)
+        result, calls = self._run(
+            [], device_listing={csv.name},
+            csv_path=csv, csv_listing=set(),
+        )
+        assert len(calls) == 1
+        assert calls[0][1] == f"/sdcard/Books/_data/{csv.name}"
+        assert result.skipped == []
+
+    def test_within_run_pushed_file_not_pushed_again(self, tmp_path):
+        """Same target name passed twice in one call: second is skipped."""
+        epubs = _make_epubs(tmp_path, 2)
+        rename_map = {epubs[0]: "same.epub", epubs[1]: "same.epub"}
+        result, calls = self._run(
+            epubs, device_listing=set(), rename_map=rename_map
+        )
+        assert len(calls) == 1
+        assert result.copied == ["/sdcard/Books/same.epub"]
+        assert result.skipped == ["/sdcard/Books/same.epub"]
+
+
+# ---------------------------------------------------------------------------
+# _list_device_files
+# ---------------------------------------------------------------------------
+
+
+class TestListDeviceFiles:
+    def test_returns_set_of_filenames_from_ls_output(self):
+        proc = MagicMock(returncode=0, stdout="a.epub\nb.epub\nc.epub\n", stderr="")
+        with patch("subprocess.run", return_value=proc):
+            result = _list_device_files(["adb"], "/sdcard/Books")
+        assert result == {"a.epub", "b.epub", "c.epub"}
+
+    def test_empty_on_nonzero_returncode(self):
+        proc = MagicMock(returncode=1, stdout="", stderr="No such file")
+        with patch("subprocess.run", return_value=proc):
+            assert _list_device_files(["adb"], "/sdcard/Missing") == set()
+
+    def test_empty_on_timeout(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("adb", 15)):
+            assert _list_device_files(["adb"], "/sdcard/Books") == set()
+
+    def test_empty_on_adb_missing(self):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            assert _list_device_files(["adb"], "/sdcard/Books") == set()
+
+    def test_strips_whitespace_and_ignores_blank_lines(self):
+        proc = MagicMock(returncode=0, stdout="  a.epub  \n\n b.epub\n\n", stderr="")
+        with patch("subprocess.run", return_value=proc):
+            result = _list_device_files(["adb"], "/sdcard/Books")
+        assert result == {"a.epub", "b.epub"}
+
+    def test_handles_filenames_with_spaces(self):
+        proc = MagicMock(
+            returncode=0,
+            stdout="100-love story.epub\n200-another tale.epub\n",
+            stderr="",
+        )
+        with patch("subprocess.run", return_value=proc):
+            result = _list_device_files(["adb"], "/sdcard/Books")
+        assert result == {"100-love story.epub", "200-another tale.epub"}

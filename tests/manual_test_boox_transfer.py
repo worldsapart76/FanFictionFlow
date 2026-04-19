@@ -41,6 +41,7 @@ print("--- Test 1: ADB device detection ---")
 print(f"  BOOX_ADB_CMD     : {config.BOOX_ADB_CMD}")
 print(f"  BOOX_DEVICE_SERIAL: {config.BOOX_DEVICE_SERIAL!r} (empty = any device)")
 print(f"  BOOX_DEVICE_PATH : {config.BOOX_DEVICE_PATH}")
+print(f"  BOOX_DEVICE_CSV_PATH : {config.BOOX_DEVICE_CSV_PATH}")
 print()
 
 try:
@@ -76,7 +77,8 @@ with tempfile.TemporaryDirectory() as tmp:
     dummy_csv = src / "FFF_test_library.csv"
     dummy_csv.write_text("id,title\n1,Test Story\n", encoding="utf-8")
 
-    print(f"  Pushing to device path: {config.BOOX_DEVICE_PATH}")
+    print(f"  Pushing epub to: {config.BOOX_DEVICE_PATH}")
+    print(f"  Pushing csv  to: {config.BOOX_DEVICE_CSV_PATH}")
     print(f"    epub : {dummy_epub.name}")
     print(f"    csv  : {dummy_csv.name}")
     print()
@@ -143,8 +145,12 @@ keep = input("  Keep test files on device for visual check? (y/n): ").strip().lo
 
 if keep != "y":
     removed = []
-    for name in ("FFF_test_story.epub", "FFF_test_library.csv"):
-        remote = f"{config.BOOX_DEVICE_PATH}/{name}"
+    targets = [
+        ("FFF_test_story.epub", config.BOOX_DEVICE_PATH),
+        ("FFF_test_library.csv", config.BOOX_DEVICE_CSV_PATH),
+    ]
+    for name, base in targets:
+        remote = f"{base}/{name}"
         proc = subprocess.run(
             adb + ["shell", "rm", "-f", remote],
             capture_output=True,
@@ -158,7 +164,7 @@ if keep != "y":
     if removed:
         print(f"  Removed from device: {', '.join(removed)}")
 else:
-    print(f"  Files left at {config.BOOX_DEVICE_PATH}/ on device.")
+    print(f"  Files left at {config.BOOX_DEVICE_PATH}/ and {config.BOOX_DEVICE_CSV_PATH}/ on device.")
 
 print()
 print("=" * 60)

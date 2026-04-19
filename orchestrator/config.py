@@ -27,7 +27,8 @@ EPUB_DOWNLOAD_DIR: Path = Path.home() / "Downloads" / "FanFicDownloads"
 
 BOOX_ADB_CMD: str = "adb"          # "adb" if on PATH; else full path to adb.exe
 BOOX_DEVICE_SERIAL: str = ""       # empty = use the only connected device
-BOOX_DEVICE_PATH: str = "/sdcard/Books"  # destination directory on the Palma
+BOOX_DEVICE_PATH: str = "/sdcard/Books"  # destination directory for epubs on the Palma
+BOOX_DEVICE_CSV_PATH: str = "/sdcard/Books/_data"  # destination directory for the library CSV
 
 # ---------------------------------------------------------------------------
 # Input file names (resolved relative to a user-selected working directory)

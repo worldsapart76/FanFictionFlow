@@ -542,7 +542,10 @@ class FanFictionFlowApp:
 
             # Step 7 — Normalise metadata
             self._log_line("Normalising metadata…")
-            existing_ships = calibre.fetch_existing_ship_values()
+            existing_ships = sorted({
+                v for book in library
+                if (v := (book.get("#primaryship") or "").strip())
+            })
             existing_collections = sorted({
                 (book.get("#collection") or "").strip()
                 for book in library
@@ -948,7 +951,9 @@ class FanFictionFlowApp:
                 epub_paths_to_transfer, csv_path=csv_path, rename_map=rename_map
             )
             self._log_line(
-                f"  Boox: {len(transfer_result.copied)} file(s) pushed."
+                f"  Boox: {len(transfer_result.copied)} pushed, "
+                f"{len(transfer_result.skipped)} already on device, "
+                f"{len(transfer_result.failed)} failed."
             )
             for src, err in transfer_result.failed:
                 self._log_line(f"  Transfer failed: {src} — {err}")
@@ -1220,7 +1225,9 @@ class FanFictionFlowApp:
                     rename_map=rename_map,
                 )
                 self._log_line(
-                    f"  Boox: {len(transfer_result.copied)} file(s) pushed."
+                    f"  Boox: {len(transfer_result.copied)} pushed, "
+                    f"{len(transfer_result.skipped)} already on device, "
+                    f"{len(transfer_result.failed)} failed."
                 )
                 for src, err in transfer_result.failed:
                     self._log_line(f"  Transfer failed: {src.name} — {err}")

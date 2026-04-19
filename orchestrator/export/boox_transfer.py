@@ -47,6 +47,7 @@ class TransferResult:
     device_path: str                                       # remote directory
     copied: list[str] = field(default_factory=list)       # remote paths pushed
     failed: list[tuple[Path, str]] = field(default_factory=list)  # (src, error)
+    skipped: list[str] = field(default_factory=list)      # remote paths already present
 
 
 # ---------------------------------------------------------------------------
@@ -62,10 +63,14 @@ def transfer_to_boox(
     """
     Push epub files and an optional library CSV to the Boox Palma via ADB.
 
-    Files are pushed to config.BOOX_DEVICE_PATH on the device. If a file
-    with the same name already exists it is overwritten. Per-file failures
-    are captured in TransferResult.failed rather than raised, so one bad
-    file does not abort the rest.
+    Epubs are pushed to config.BOOX_DEVICE_PATH; the CSV, if provided, is
+    pushed to config.BOOX_DEVICE_CSV_PATH (a sibling subfolder on the
+    device). Files whose target basename is already present on the device
+    are skipped (recorded in TransferResult.skipped) rather than overwritten,
+    so re-running transfer after manual downloads does not re-push
+    previously-transferred files. Per-file failures are captured in
+    TransferResult.failed rather than raised, so one bad file does not
+    abort the rest.
 
     Args:
         epub_paths:  Local epub files to push.
@@ -87,18 +92,28 @@ def transfer_to_boox(
     _check_connected(adb)
 
     device_path = config.BOOX_DEVICE_PATH
+    csv_device_path = config.BOOX_DEVICE_CSV_PATH
     result = TransferResult(device_path=device_path)
 
-    sources: list[Path] = list(epub_paths)
+    sources: list[tuple[Path, str]] = [(src, device_path) for src in epub_paths]
     if csv_path is not None:
-        sources.append(csv_path)
+        sources.append((csv_path, csv_device_path))
 
-    for src in sources:
+    listings: dict[str, set[str]] = {}
+    for _, base in sources:
+        if base not in listings:
+            listings[base] = _list_device_files(adb, base)
+
+    for src, base in sources:
         dest_name = (rename_map or {}).get(src, src.name)
-        remote = f"{device_path}/{dest_name}"
+        remote = f"{base}/{dest_name}"
+        if dest_name in listings[base]:
+            result.skipped.append(remote)
+            continue
         try:
             _push_file(adb, src, remote)
             result.copied.append(remote)
+            listings[base].add(dest_name)
         except OSError as exc:
             result.failed.append((src, str(exc)))
 
@@ -150,6 +165,29 @@ def _check_connected(adb: list[str]) -> None:
             f"Check USB connection and that USB debugging is enabled. "
             f"ADB output: {detail!r}"
         )
+
+
+def _list_device_files(adb: list[str], device_path: str) -> set[str]:
+    """
+    Return the set of filenames present in device_path on the Boox.
+
+    Uses `adb shell ls -1` (one name per line). Missing directory, empty
+    directory, or any listing failure returns an empty set — callers then
+    treat every file as new and push it.
+    """
+    try:
+        proc = subprocess.run(
+            adb + ["shell", "ls", "-1", device_path],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=_NO_WINDOW,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+        return set()
+    if proc.returncode != 0:
+        return set()
+    return {line.strip() for line in proc.stdout.splitlines() if line.strip()}
 
 
 def _push_file(adb: list[str], src: Path, remote: str) -> None:

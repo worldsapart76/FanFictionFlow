@@ -24,6 +24,13 @@ Always use these paths as defaults in config. Never hardcode them inside logic m
 
 ---
 
+## Cross-Project Architecture
+
+Decisions spanning multiple projects (Unraid infrastructure, Calibre server location,
+CB redesign dependency ordering, open strategic decisions): `C:\Dev\ARCHITECTURE.md`
+
+---
+
 ## Related Repositories
 
 **This repo** (`fanfictionflow`) contains:
@@ -171,9 +178,11 @@ The Palma connects as an MTP portable device ("Palma 2 > Internal shared storage
 
 - **USB debugging must be enabled** on the Palma: Settings → Security → Developer options → USB debugging.
 - ADB is installed at the Windows system level (`winget install Google.PlatformTools`); `adb` is on PATH.
-- ADB config: `BOOX_ADB_CMD`, `BOOX_DEVICE_SERIAL`, `BOOX_DEVICE_PATH` in `config.py`.
+- ADB config: `BOOX_ADB_CMD`, `BOOX_DEVICE_SERIAL`, `BOOX_DEVICE_PATH` (epubs), `BOOX_DEVICE_CSV_PATH` (library CSV) in `config.py`. Epubs go to `/sdcard/Books`; the CSV goes to the `_data` subfolder (`/sdcard/Books/_data`) so the CalibreFanFicBrowser app can find it there.
 
 **Epub renaming on transfer:** FanFicFare names epubs as `title-ao3_NNNNNN.epub`. The CalibreFanFicBrowser Android app expects `{calibre_id}-{title}.epub` (matching calibredb's save-to-disk format) so it can match epub files to library CSV rows by Calibre ID. `transfer_to_boox()` accepts a `rename_map: dict[Path, str]` parameter for this purpose. Both the full sync path and the standalone "Transfer to Boox" step build and pass this map automatically.
+
+**Skip-if-already-on-device:** `transfer_to_boox()` lists the target directories once via `adb shell ls -1` and skips any file whose **target** basename (after rename) is already present. This prevents re-pushing files when the user re-runs Transfer to Boox after manually downloading previously-failed epubs. Skipped files appear in `TransferResult.skipped`; failures still go to `TransferResult.failed`. A listing failure (missing directory, ADB error, timeout) falls back to treating every file as new.
 
 ---
 
@@ -222,7 +231,7 @@ An active migration plan for moving all projects from WSL/Dropbox to `C:\Dev\` i
 
 ## Current State
 
-All milestones 1–11, Palma read status sync, and Phase 2 browser openers are complete and tested. The app has run successfully end-to-end multiple times on real data. Test suite: **467 passing, 0 failures** on Windows.
+All milestones 1–11, Palma read status sync, and Phase 2 browser openers are complete and tested. The app has run successfully end-to-end multiple times on real data. Test suite: **480 passing, 0 failures** on Windows.
 
 | Module | Purpose |
 |---|---|
